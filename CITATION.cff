@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "Cite the original Hernandez et al. PAM/BAM paper and identify the software version used."
+title: "PAM BAM single and dual layer aperture modulation"
+version: 0.1.0
+date-released: 2026-09-13
+type: software
+license: MIT
+authors:
+  - family-names: Grohmann
+    given-names: Maximilian
+    orcid: "https://orcid.org/0000-0002-6909-811X"
+repository-code: "https://github.com/Kiragroh/PAM-BAM"
+preferred-citation:
+  type: article
+  title: "Quantification of the aperture modulation in radiotherapy treatment plans"
+  authors:
+    - family-names: Hernandez
+      given-names: Victor
+    - family-names: Lara-Aristimuño
+      given-names: Iñigo
+    - family-names: Abella
+      given-names: Ruben
+    - family-names: Saez
+      given-names: Jordi
+  journal: Medical Physics
+  year: 2025
+  volume: 52
+  issue: 12
+  start: e70144
+  doi: "10.1002/mp.70144"

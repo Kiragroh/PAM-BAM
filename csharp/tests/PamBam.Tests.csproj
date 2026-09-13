@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup><Compile Include="../PamBam.cs" Link="PamBam.cs" /></ItemGroup>
+  <ItemGroup><Content Include="../../tests/geometry_cases.json" Link="geometry_cases.json" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+</Project>

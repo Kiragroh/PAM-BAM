@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pambam"
+version = "0.1.0"
+description = "Read-only single- and dual-layer MLC aperture modulation research functions"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "Maximilian Grohmann"}]
+
+[project.urls]
+Repository = "https://github.com/Kiragroh/PAM-BAM"
+
+[tool.setuptools.packages.find]
+include = ["pambam*"]

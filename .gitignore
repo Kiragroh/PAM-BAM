@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+*.dcm
+*.pdf
+*.docx
+*.xlsx
+*.log
+private/
+local/
+.DS_Store
