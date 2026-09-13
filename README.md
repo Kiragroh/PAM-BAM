@@ -13,11 +13,13 @@ clinically commissioned software.
 | TPS | Standalone script | Current test status |
 |---|---|---|
 | RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | User reports successful execution; about 4 s/field at 2 mm |
-| Eclipse / ESAPI, TrueBeam HD120 | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | Compiled with ESAPI 18; 41 synthetic assertions; live Eclipse test pending |
+| Eclipse / ESAPI, SD / HD / Halcyon SX | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | GUI 1.1: ESAPI 18 compile; 71 synthetic assertions; native test/mapping validation pending |
 
-The ESAPI GUI uses the native target mesh, an explicit HD120 profile, native
-cumulative CP weights and a 2 mm default BEV grid. It reports BAM, plan PAM and
-elapsed time per field. See [ESAPI usage and scope](scripts/esapi/README.md).
+The ESAPI GUI offers Auto, TrueBeam SD (Millennium 120), TrueBeam HD (HD120) and
+Halcyon SX dual-layer profiles, using the native target mesh and cumulative CP
+weights. The default BEV grid is 2 mm. For dual-layer use, select the locally
+verified native leaf order explicitly. It reports BAM, plan PAM and elapsed
+time per field. See [ESAPI usage and scope](scripts/esapi/README.md).
 
 [RayStation: PAM_BAM.py](scripts/raystation/PAM_BAM.py) is a standalone, read-only
 file script: choose the target ROI and grid spacing, then calculate BAM per beam

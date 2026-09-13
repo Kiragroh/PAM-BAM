@@ -1,4 +1,4 @@
-// PAM / BAM 1.0 -- read-only single-file ESAPI plug-in, TrueBeam / HD120.
+// PAM / BAM 1.1 -- read-only single-file ESAPI plug-in, selectable MLC profiles.
 // Run this .cs file from Eclipse with one external photon plan open.
 // API lengths and mesh positions are mm in DICOM coordinates. No dose required.
 // The selected native ROI mesh is projected at EVERY CP onto the isocenter plane.
@@ -6,9 +6,14 @@
 // AM = blocked target projection fraction. BAM uses half each incremental MU
 // interval at both endpoints (trapezoidal CP approximation). PAM uses beam MU,
 // not Beam.WeightFactor. No leaf-motion/dose/transmission model is evaluated.
-// Scope: HFS, conventional IEC geometry, static couch yaw, HD120 (60 pairs).
+// Scope: HFS, conventional IEC geometry, static couch yaw; Millennium/HD120
+// and Halcyon SX dual-layer profiles. Auto or explicit profile selection.
 // HD120: 14 x 5 mm + 32 x 2.5 mm + 14 x 5 mm, -110 to +110 mm at isocenter.
-// Native model and bank counts are checked; other/dual-layer MLCs are rejected.
+// Millennium120: 10x10 + 40x5 + 10x10 mm. Halcyon SX: 29/28 pairs, 10 mm
+// widths with 5 mm stagger, both layers intersected and fixed 280 mm field.
+// Dual-layer native ordering MUST be explicitly selected from local knowledge;
+// it is not inferred from 57 leaves. Check the mapping in local commissioning.
+// Known conflicting models and incomplete native arrays are rejected.
 // Native source positions independently check the assumed beam frame at each CP.
 // Unknown model aliases must be reviewed locally before adding an exact alias.
 // Native Eclipse execution/commissioning is pending. See accompanying README.
@@ -86,6 +91,36 @@ namespace PamBamSimple
         public int Width, Height;
         public bool[] Target;
     }
+    public sealed class MlcLayer
+    {
+        public int[] Indices;
+        public double[] Edges;
+    }
+    public sealed class MlcProfile
+    {
+        public string Name;
+        public int Kind;
+        public MlcLayer[] Layers;
+        public double[] FixedLimits;
+        public void Validate(int leafCount)
+        {
+            Calculation.Check(Layers!=null && (Layers.Length==1 || Layers.Length==2),"One or two complete MLC layers required.");
+            var indices=new List<int>();
+            foreach(var layer in Layers)
+            {
+                Calculation.Check(layer!=null && layer.Indices!=null && layer.Edges!=null &&
+                    layer.Indices.Length>0 && layer.Edges.Length==layer.Indices.Length+1,"Incomplete MLC strip profile.");
+                for(int i=0;i<layer.Edges.Length;i++)
+                {
+                    Calculation.Finite(layer.Edges[i]);
+                    if(i>0) Calculation.Check(layer.Edges[i]>layer.Edges[i-1],"MLC strip boundaries must increase.");
+                }
+                indices.AddRange(layer.Indices);
+            }
+            Calculation.Check(indices.OrderBy(i=>i).SequenceEqual(Enumerable.Range(0,leafCount)),
+                "MLC profile must map every native leaf pair exactly once. Check profile and native bank count.");
+        }
+    }
     public static class Calculation
     {
         public static void Check(bool condition,string message)
@@ -149,12 +184,56 @@ namespace PamBamSimple
             return edges;
         }
 
+        public static double[] Millennium120Boundaries()
+        {
+            var edges=new double[61]; edges[0]=-200;
+            for(int i=0;i<60;i++) edges[i+1]=edges[i]+(i<10 || i>=50 ? 10.0 : 5.0);
+            return edges;
+        }
+
+        static string ModelKey(string model)
+        { return new string((model??"").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant(); }
+
         public static bool IsHd120Model(string model)
         {
             // Exact semantic aliases, never infer the MLC from "120" or leaf count.
-            string key=new string((model??"").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+            string key=ModelKey(model);
             return key=="HD120" || key=="VARIANHD120" || key=="HIGHDEFINITION120" ||
                 key=="VARIANHIGHDEFINITION120";
+        }
+
+        public static int ModelKind(string model)
+        {
+            if(IsHd120Model(model)) return 2;
+            string key=ModelKey(model);
+            if(new[]{"MILLENNIUM120","MILLENIUM120","VARIANMILLENNIUM120","VARIANMILLENIUM120"}.Contains(key)) return 1;
+            if(new[]{"SX1","SX2","HALCYON","HALCYONSX1","HALCYONSX2","VARIANHALCYON","VARIANSX1","VARIANSX2"}.Contains(key)) return 3;
+            return 0;
+        }
+
+        public static MlcProfile ResolveProfile(string model,int selection,int dualOrder)
+        {
+            int recognized=ModelKind(model),kind=selection==0 ? recognized : selection;
+            Check(kind>=1 && kind<=3,"Unknown MLC model: explicitly select a matching, locally verified profile.");
+            Check(selection==0 || recognized==0 || recognized==kind,
+                "Selected profile conflicts with the native MLC model. Choose Auto or the matching profile.");
+            if(kind==1 || kind==2)
+                return new MlcProfile { Kind=kind,Name=kind==1 ? "Millennium 120 (SD)" : "HD120",
+                    Layers=new[]{new MlcLayer { Indices=Enumerable.Range(0,60).ToArray(),
+                        Edges=kind==1 ? Millennium120Boundaries() : Hd120Boundaries() }} };
+            Check(dualOrder>=1 && dualOrder<=3,
+                "Dual-layer: select the locally verified native leaf order. 57 pairs alone do not identify the order.");
+            int[] layer29,layer28;
+            if(dualOrder==1)
+            { layer29=Enumerable.Range(0,29).Select(i=>2*i).ToArray();layer28=Enumerable.Range(0,28).Select(i=>2*i+1).ToArray(); }
+            else if(dualOrder==2)
+            { layer29=Enumerable.Range(0,29).ToArray();layer28=Enumerable.Range(29,28).ToArray(); }
+            else
+            { layer28=Enumerable.Range(0,28).ToArray();layer29=Enumerable.Range(28,29).ToArray(); }
+            return new MlcProfile { Kind=3,Name="Halcyon SX / "+(dualOrder==1 ? "interleaved" : dualOrder==2 ? "29+28" : "28+29"),FixedLimits=new[]{-140.0,-140,140,140},
+                Layers=new[]{
+                    new MlcLayer { Indices=layer29,Edges=Enumerable.Range(0,30).Select(i=>-145.0+10*i).ToArray() },
+                    new MlcLayer { Indices=layer28,Edges=Enumerable.Range(0,29).Select(i=>-140.0+10*i).ToArray() }} };
         }
 
         public static Sample Project(Mesh mesh,Vec iso,double sad,Vec[] frame,double step,Action pulse)
@@ -209,28 +288,40 @@ namespace PamBamSimple
         }
 
         public static double BlockedFraction(Sample grid,float[,] leaves,double[] jaws)
+        { return BlockedFraction(grid,leaves,jaws,ResolveProfile("HD120",2,0)); }
+
+        public static double BlockedFraction(Sample grid,float[,] leaves,double[] jaws,MlcProfile profile)
         {
-            Check(leaves!=null && leaves.GetLength(0)==2 && leaves.GetLength(1)==60,
-                "HD120 requires exactly 2 banks of 60 leaf pairs; no dual-layer mapping is inferred.");
+            Check(leaves!=null && leaves.GetLength(0)==2 && profile!=null,"Two native leaf banks and an explicit MLC profile are required.");
+            profile.Validate(leaves.GetLength(1));
+            jaws=profile.FixedLimits??jaws;
             Check(jaws!=null && jaws.Length==4,"Complete native jaws required.");
             foreach(double p in jaws) Finite(p);
             // ESAPI VRect order stored here: X1,Y1,X2,Y2.
             Check(jaws[0]<=jaws[2] && jaws[1]<=jaws[3],"Invalid signed jaw limits.");
-            for(int i=0;i<60;i++)
+            for(int i=0;i<leaves.GetLength(1);i++)
                 Check(Finite(leaves[0,i])<=Finite(leaves[1,i]),"Crossed opposing leaf tips are unsupported.");
-            double[] edges=Hd120Boundaries(); int total=0,opened=0;
+            int total=0,opened=0;
             for(int j=0;j<grid.Height;j++)
             {
                 double y=grid.Y0+j*grid.Step;
-                int leaf=Array.BinarySearch(edges,y);
-                if(leaf<0) leaf=~leaf-1;
-                bool yOpen=leaf>=0 && leaf<60 && y>=jaws[1] && y<jaws[3];
+                double left=jaws[0],right=jaws[2];
+                bool yOpen=y>=jaws[1] && y<jaws[3];
+                foreach(var layer in profile.Layers)
+                {
+                    int strip=Array.BinarySearch(layer.Edges,y);
+                    if(strip<0) strip=~strip-1;
+                    if(strip<0 || strip>=layer.Indices.Length) { yOpen=false;break; }
+                    int leaf=layer.Indices[strip];
+                    // Intersect all layer openings; never add or average areas.
+                    left=Math.Max(left,leaves[0,leaf]);right=Math.Min(right,leaves[1,leaf]);
+                }
                 for(int i=0;i<grid.Width;i++)
                 {
                     if(!grid.Target[j*grid.Width+i]) continue;
                     total++;
                     double x=grid.X0+i*grid.Step;
-                    if(yOpen && x>=jaws[0] && x<jaws[2] && x>=leaves[0,leaf] && x<leaves[1,leaf]) opened++;
+                    if(yOpen && x>=left && x<right) opened++;
                 }
             }
             Check(total>0,"Target projection is empty.");
@@ -243,6 +334,7 @@ namespace PamBamSimple
     {
         public string Beam { get; set; }
         public string MLC { get; set; }
+        public string Profile { get; set; }
         public string MU { get; set; }
         public string CPs { get; set; }
         public string BAM { get; set; }
@@ -254,7 +346,7 @@ namespace PamBamSimple
     {
         readonly ExternalPlanSetup plan;
         readonly Window window;
-        readonly ComboBox roiBox=new ComboBox(),gridBox=new ComboBox();
+        readonly ComboBox roiBox=new ComboBox(),gridBox=new ComboBox(),mlcBox=new ComboBox(),orderBox=new ComboBox();
         readonly Button calculate=new Button { Content="Calculate" },cancel=new Button { Content="Cancel",IsEnabled=false };
         readonly TextBlock pam=new TextBlock { Text="Plan PAM: —",FontSize=22,FontWeight=FontWeights.Bold };
         readonly TextBlock status=new TextBlock { Text="Choose the target ROI and press Calculate.",TextWrapping=TextWrapping.Wrap };
@@ -266,12 +358,12 @@ namespace PamBamSimple
         public Viewer(ExternalPlanSetup currentPlan,Window host)
         {
             plan=currentPlan; window=host;
-            window.Title="PAM / BAM 1.0 — ESAPI / HD120"; window.Width=1080; window.Height=650;
+            window.Title="PAM / BAM 1.1 — ESAPI"; window.Width=1180; window.Height=690;
             window.MinWidth=880; window.MinHeight=510;
             var panel=new DockPanel { Margin=new Thickness(18) };
             var header=new StackPanel(); DockPanel.SetDock(header,Dock.Top); panel.Children.Add(header);
             header.Children.Add(new TextBlock { Text="Plan Aperture Modulation",FontSize=25,FontWeight=FontWeights.Bold });
-            header.Children.Add(new TextBlock { Text="Read-only | TrueBeam / HD120 | numerical approximation",Margin=new Thickness(0,4,0,15) });
+            header.Children.Add(new TextBlock { Text="Read-only | SD / HD / Halcyon dual-layer | numerical approximation",Margin=new Thickness(0,4,0,15) });
             var controls=new StackPanel { Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,12) };
             header.Children.Add(controls);
             controls.Children.Add(new TextBlock { Text="Target ROI",VerticalAlignment=VerticalAlignment.Center });
@@ -286,24 +378,37 @@ namespace PamBamSimple
             gridBox.Width=65;gridBox.Margin=new Thickness(8,0,14,0);controls.Children.Add(gridBox);
             calculate.Padding=new Thickness(12,3,12,3);cancel.Padding=new Thickness(12,3,12,3);
             cancel.Margin=new Thickness(8,0,0,0);controls.Children.Add(calculate);controls.Children.Add(cancel);
+            var mlcControls=new StackPanel { Orientation=Orientation.Horizontal,Margin=new Thickness(0,0,0,12) };
+            header.Children.Add(mlcControls);
+            mlcControls.Children.Add(new TextBlock { Text="MLC profile",VerticalAlignment=VerticalAlignment.Center });
+            mlcBox.ItemsSource=new[]{"Auto (native model)","TrueBeam SD / Millennium 120","TrueBeam HD / HD120","Dual-layer / Halcyon SX"};
+            mlcBox.SelectedIndex=0;mlcBox.Width=255;mlcBox.Margin=new Thickness(8,0,16,0);mlcControls.Children.Add(mlcBox);
+            mlcControls.Children.Add(new TextBlock { Text="Dual-layer leaf order",VerticalAlignment=VerticalAlignment.Center });
+            orderBox.ItemsSource=new[]{"Select verified native order","Interleaved: 29 even / 28 odd","Layer blocks: 29 then 28","Layer blocks: 28 then 29"};
+            orderBox.SelectedIndex=0;orderBox.Width=245;orderBox.Margin=new Thickness(8,0,0,0);mlcControls.Children.Add(orderBox);
             var footer=new StackPanel { Margin=new Thickness(0,12,0,0) };
             DockPanel.SetDock(footer,Dock.Bottom);panel.Children.Add(footer);
             footer.Children.Add(pam);footer.Children.Add(status);footer.Children.Add(detail);
-            footer.Children.Add(new TextBlock { Text="0 = target projection fully open   •   1 = fully blocked\nMU-weighted geometry, not dose coverage. HD120 profile: 14×5 + 32×2.5 + 14×5 mm.",
+            footer.Children.Add(new TextBlock { Text="0 = target projection fully open   •   1 = fully blocked\nMU-weighted geometry, not dose coverage. Dual-layer uses the shared opening of both layers.\nDual-layer order is an explicit local mapping; select it only after comparison with the TPS leaf display.",
                 TextWrapping=TextWrapping.Wrap,Margin=new Thickness(0,12,0,0) });
-            string[] names={"Beam","MLC","MU","CPs","BAM","Seconds","Status"};
-            int[] widths={100,160,80,55,80,70,350};
+            string[] names={"Beam","MLC","Profile","MU","CPs","BAM","Seconds","Status"};
+            int[] widths={90,140,150,75,50,75,65,350};
             for(int i=0;i<names.Length;i++) table.Columns.Add(new DataGridTextColumn {
                 Header=names[i],Binding=new Binding(names[i]),Width=widths[i] });
             table.ItemsSource=rows; panel.Children.Add(table);window.Content=panel;
             calculate.Click+=(s,e)=>Calculate();cancel.Click+=(s,e)=>cancelled=true;
-            table.SelectionChanged+=(s,e)=> { var row=table.SelectedItem as BeamRow; if(row!=null) detail.Text=row.Beam+": "+row.Status; };
+            table.SelectionChanged+=(s,e)=> { var row=table.SelectedItem as BeamRow; if(row!=null) detail.Text=row.Beam+" / "+row.Profile+": "+row.Status; };
             roiBox.SelectionChanged+=(s,e)=>Invalidate();gridBox.SelectionChanged+=(s,e)=>Invalidate();
+            mlcBox.SelectionChanged+=(s,e)=> { UpdateOrderControl();Invalidate(); };
+            orderBox.SelectionChanged+=(s,e)=>Invalidate();UpdateOrderControl();
             window.Closing+=(s,e)=> { if(running) { cancelled=true;e.Cancel=true; } };
         }
 
         void Invalidate()
         { if(!running) { rows.Clear();pam.Text="Plan PAM: —";status.Text="Selection changed. Press Calculate.";detail.Text=""; } }
+        void UpdateOrderControl()
+        { orderBox.IsEnabled=!running && (mlcBox.SelectedIndex==3 || (mlcBox.SelectedIndex==0 &&
+            plan.Beams.Any(b=>!b.IsSetupField && b.MLC!=null && Calculation.ModelKind(b.MLC.Model)==3))); }
         void Pulse()
         {
             // All API access stays on the owning STA; no worker, task or async API use.
@@ -323,10 +428,9 @@ namespace PamBamSimple
             mesh.Validate(); return mesh;
         }
 
-        double CalculateBeam(Beam beam,Mesh mesh,double spacing,out int ncp)
+        double CalculateBeam(Beam beam,Mesh mesh,double spacing,MlcProfile profile,out int ncp)
         {
-            Calculation.Check(beam.MLC!=null && Calculation.IsHd120Model(beam.MLC.Model),
-                "This viewer requires an exact HD120 model alias. See MLC column; no width inference from leaf count.");
+            Calculation.Check(beam.MLC!=null,"A treatment MLC is required.");
             Calculation.Check(beam.Applicator==null && !beam.Blocks.Any() && beam.Compensator==null && !beam.Wedges.Any(),
                 "Applicators, custom blocks, compensators and wedges are unsupported.");
             Calculation.Check(string.IsNullOrEmpty(beam.MotionCompensationTechnique),"Motion compensation is unsupported.");
@@ -364,8 +468,10 @@ namespace PamBamSimple
                 Pulse();
                 if(weights[i]==0) continue;
                 var target=Calculation.Project(mesh,iso,sad,frame,spacing,Pulse);
-                var jaws=cp.JawPositions;
-                am[i]=Calculation.BlockedFraction(target,cp.LeafPositions,new[]{jaws.X1,jaws.Y1,jaws.X2,jaws.Y2});
+                double[] nativeJaws=null;
+                if(profile.FixedLimits==null)
+                { var jaws=cp.JawPositions;nativeJaws=new[]{jaws.X1,jaws.Y1,jaws.X2,jaws.Y2}; }
+                am[i]=Calculation.BlockedFraction(target,cp.LeafPositions,nativeJaws,profile);
             }
             return Calculation.WeightedMean(am,weights);
         }
@@ -374,7 +480,7 @@ namespace PamBamSimple
         {
             if(running) return;
             running=true;cancelled=false;calculate.IsEnabled=false;cancel.IsEnabled=true;
-            roiBox.IsEnabled=gridBox.IsEnabled=false;rows.Clear();detail.Text="";pam.Text="Plan PAM: calculating…";
+            roiBox.IsEnabled=gridBox.IsEnabled=mlcBox.IsEnabled=orderBox.IsEnabled=false;rows.Clear();detail.Text="";pam.Text="Plan PAM: calculating…";
             int failed=0,excluded=0,total=0;var bams=new List<double>();var mus=new List<double>();
             BeamRow active=null;
             var timer=Stopwatch.StartNew();
@@ -388,7 +494,7 @@ namespace PamBamSimple
                 var mesh=ReadMesh(target);
                 foreach(var beam in plan.Beams)
                 {
-                    active=new BeamRow { Beam=beam.Id,MLC=beam.MLC==null ? "—" : beam.MLC.Model,MU="—",CPs="—",BAM="—",Seconds="—",Status="Reading…" };
+                    active=new BeamRow { Beam=beam.Id,MLC=beam.MLC==null ? "—" : beam.MLC.Model,Profile="—",MU="—",CPs="—",BAM="—",Seconds="—",Status="Reading…" };
                     rows.Add(active);var clock=Stopwatch.StartNew();
                     try
                     {
@@ -399,7 +505,10 @@ namespace PamBamSimple
                         Calculation.Check(mu>=0,"Negative beam MU.");active.MU=mu.ToString("0.00",CultureInfo.InvariantCulture);
                         if(mu==0) { excluded++;active.Status="Zero-MU field excluded";continue; }
                         total++;int ncp;
-                        double bam=CalculateBeam(beam,mesh,spacing,out ncp);
+                        Calculation.Check(beam.MLC!=null,"A treatment MLC is required.");
+                        var profile=Calculation.ResolveProfile(beam.MLC.Model,mlcBox.SelectedIndex,orderBox.SelectedIndex);
+                        active.Profile=profile.Name;
+                        double bam=CalculateBeam(beam,mesh,spacing,profile,out ncp);
                         active.CPs=ncp.ToString(CultureInfo.InvariantCulture);
                         active.BAM=bam.ToString("0.0000",CultureInfo.InvariantCulture);
                         active.Status="OK (sampled geometry)";bams.Add(bam);mus.Add(mu);
@@ -421,7 +530,7 @@ namespace PamBamSimple
             catch(Exception ex)
             { pam.Text="Plan PAM: unavailable";status.Text=SafeMessage(ex); }
             finally
-            { running=false;calculate.IsEnabled=true;cancel.IsEnabled=false;roiBox.IsEnabled=gridBox.IsEnabled=true; }
+            { running=false;calculate.IsEnabled=true;cancel.IsEnabled=false;roiBox.IsEnabled=gridBox.IsEnabled=mlcBox.IsEnabled=true;UpdateOrderControl(); }
         }
         static string SafeMessage(Exception ex)
         { return ex is InputError ? ex.Message : "ESAPI read failed ("+ex.GetType().Name+"). Check the current plan/ROI."; }

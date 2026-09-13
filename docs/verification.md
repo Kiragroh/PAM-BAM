@@ -7,9 +7,12 @@
   **4 seconds per field with a 2 mm grid**. The exact tested source is included.
   See [RayStation details](../scripts/raystation/README.md) for its source hash
   and the distinction between user runtime feedback and commissioning.
-- ESAPI GUI 1.0 (TrueBeam / HD120): native x64/.NET Framework 4.8 compile against
-  ESAPI API file version **18.0.1.261** passed; **41 synthetic numerical
-  assertions passed**. Execution inside Eclipse is pending.
+- ESAPI GUI 1.1 (Auto / TrueBeam SD / HD / Halcyon SX): native x64/.NET Framework
+  4.8 compile against ESAPI API file version **18.0.1.261** passed;
+  **71 synthetic numerical assertions passed**. These include SD/HD widths,
+  dual-layer intersection and stagger, three explicitly selected index mappings,
+  fixed Halcyon limits and rejection of missing/duplicate/conflicting mappings.
+  Execution inside Eclipse and the site's dual-layer index mapping are pending.
   See [ESAPI details](../scripts/esapi/README.md).
 - No patient screenshot, identifiers, target names, DICOM or vendor assemblies
   are included. The earlier library verification below describes the original
