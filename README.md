@@ -10,6 +10,15 @@ clinically commissioned software.
 
 ## Simple GUI scripts
 
+| TPS | Standalone script | Current test status |
+|---|---|---|
+| RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | User reports successful execution; about 4 s/field at 2 mm |
+| Eclipse / ESAPI, TrueBeam HD120 | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | Compiled with ESAPI 18; 41 synthetic assertions; live Eclipse test pending |
+
+The ESAPI GUI uses the native target mesh, an explicit HD120 profile, native
+cumulative CP weights and a 2 mm default BEV grid. It reports BAM, plan PAM and
+elapsed time per field. See [ESAPI usage and scope](scripts/esapi/README.md).
+
 [RayStation: PAM_BAM.py](scripts/raystation/PAM_BAM.py) is a standalone, read-only
 file script: choose the target ROI and grid spacing, then calculate BAM per beam
 and MU-weighted PAM for the open plan. It includes a perspective ROI projector
@@ -90,7 +99,7 @@ Run `python -m examples.synthetic` for a two-beam example.
 
 ## TPS adapters and what still needs local integration
 
-The following are **library adapters**, distinct from the standalone GUI above. Neither adapter
+The following are **library adapters**, distinct from the standalone GUIs above. Neither adapter
 creates a patient context, writes a structure, launches a process, saves a plan,
 nor calculates the 3D target silhouette automatically. A site-validated target
 projection provider at every control point is required. This boundary is

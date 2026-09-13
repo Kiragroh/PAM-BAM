@@ -1,5 +1,22 @@
 # Verification scope
 
+## Standalone GUI additions
+
+- RayStation GUI 1.0: **22 synthetic tests passed**, including the Tk UI.
+  The user subsequently reported successful native execution and approximately
+  **4 seconds per field with a 2 mm grid**. The exact tested source is included.
+  See [RayStation details](../scripts/raystation/README.md) for its source hash
+  and the distinction between user runtime feedback and commissioning.
+- ESAPI GUI 1.0 (TrueBeam / HD120): native x64/.NET Framework 4.8 compile against
+  ESAPI API file version **18.0.1.261** passed; **41 synthetic numerical
+  assertions passed**. Execution inside Eclipse is pending.
+  See [ESAPI details](../scripts/esapi/README.md).
+- No patient screenshot, identifiers, target names, DICOM or vendor assemblies
+  are included. The earlier library verification below describes the original
+  release, not the later reported RayStation GUI run.
+
+## Original library release
+
 Date: 2026-09-13. Version: 0.1.0.
 
 Executed locally with Python 3.12.14 (bundled runtime) and .NET SDK 10.0.204:
