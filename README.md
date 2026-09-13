@@ -8,6 +8,20 @@ C# source for ESAPI projects. No cloud service, patient export, or TPS mutation.
 This is an implementation of published metrics, **not a new metric** and not
 clinically commissioned software.
 
+## Simple GUI scripts
+
+[RayStation: PAM_BAM.py](scripts/raystation/PAM_BAM.py) is a standalone, read-only
+file script: choose the target ROI and grid spacing, then calculate BAM per beam
+and MU-weighted PAM for the open plan. It includes a perspective ROI projector
+at every native control point. NumPy and Tkinter are required; the repository
+package does not have to be installed.
+
+**Runtime feedback:** the user successfully ran GUI version 1.0 in RayStation
+and reported approximately **4 seconds per field at a 2 mm grid**. This is one
+reported application run, not a universal benchmark or commissioning result.
+The exact tested script is included unchanged. No clinical screenshot, plan
+identifiers or target names are published. See [usage and validation](scripts/raystation/README.md).
+
 ## Definitions
 
 At sample j, let T be the target's projected silhouette and O the effective
@@ -76,7 +90,7 @@ Run `python -m examples.synthetic` for a two-beam example.
 
 ## TPS adapters and what still needs local integration
 
-These are **library adapters, not ready-to-run clinical plug-ins**. Neither adapter
+The following are **library adapters**, distinct from the standalone GUI above. Neither adapter
 creates a patient context, writes a structure, launches a process, saves a plan,
 nor calculates the 3D target silhouette automatically. A site-validated target
 projection provider at every control point is required. This boundary is
@@ -94,7 +108,8 @@ was compiled against ESAPI 16.1 locally, but live TPS execution is not validated
 
 For RayStation, see [integration notes](docs/tps-integration.md). The adapter's
 bank/length contract was checked against the v2025 SP2 scripting documentation
-and tested with synthetic objects. It was **not run in RayStation**. API availability,
+and tested with synthetic objects. The library adapter itself was **not run in RayStation**; the standalone GUI
+has the user-reported run described above. API availability,
 projection frames, machine profiles and segment/CP weights require local validation.
 
 ## Tests
