@@ -12,8 +12,8 @@ clinically commissioned software.
 
 | TPS | Standalone script | Current test status |
 |---|---|---|
-| RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | GUI 1.3: faster NumPy projection, exact-view cache, phase timings; 38 synthetic tests; new native test pending |
-| Eclipse / ESAPI, SD / HD / Halcyon SX | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | GUI 1.2: ESAPI 18 compile; 65 synthetic assertions; fixed user-confirmed 28+29 Halcyon order |
+| RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | GUI 1.3: user-confirmed run in RayStation 2024; 38 synthetic tests; NumPy projection and exact-view cache |
+| Eclipse / ESAPI, SD / HD / Halcyon SX | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | GUI 1.2: user-confirmed Halcyon run; ESAPI 18 compile; 65 synthetic assertions; 28+29 native order |
 
 The ESAPI GUI offers Auto, TrueBeam SD (Millennium 120), TrueBeam HD (HD120) and
 Halcyon SX dual-layer profiles, using the native target mesh and cumulative CP
@@ -27,19 +27,23 @@ and MU-weighted PAM for the open plan. It includes a perspective ROI projector
 at every native control point. NumPy and Tkinter are required; the repository
 package does not have to be installed.
 
-**Runtime feedback:** the user successfully ran GUI version 1.0 in RayStation
-and reported approximately **4 seconds per field at a 2 mm grid**. This is one
-reported application run, not a universal benchmark or commissioning result.
-The tested 1.0 script is preserved in Git history. Version 1.1 added surface
-projection and a live timer, but user feedback identified a 0.5 mm grid-size
-failure and a remaining speed gap versus Eclipse. Version 1.2 fixes the total
-voxel limit using bounded reads and adds phase timings. The subsequent 2024
-runtime feedback identified projection as the remaining bottleneck. Version 1.3
-optimizes NumPy array processing and reuses exactly matching projected targets
-within a calculation. It remains one Python file with no DLL or extra dependency.
-Local projection-only tests were 1.8–2.9x faster than 1.2; this does not establish
-RayStation wall-clock speed or parity with Eclipse. No clinical screenshot, plan
-identifiers or target names are published. See [usage and validation](scripts/raystation/README.md).
+**Runtime feedback:** the user confirmed successful runs of RayStation GUI 1.3
+and ESAPI GUI 1.2 and supplied the screenshots below for publication. Both
+examples use a **2.0 mm grid**. RayStation shows **PAM 0.5430 in 2.1 s**;
+Eclipse shows **PAM 0.5431 in 0.4 s**. These are individual application runs,
+not universal timing benchmarks or a cross-TPS validation study.
+
+RayStation 1.3 remains one Python file, using NumPy for projection and a bounded
+cache for exactly matching views. See [usage and validation](scripts/raystation/README.md)
+for the numerical method, earlier versions and synthetic benchmarks.
+
+### RayStation 2024 — GUI 1.3
+
+![RayStation PAM/BAM GUI 1.3 showing beam results, plan PAM and phase timings](docs/images/raystation-pam-bam-1.3.png)
+
+### Eclipse / ESAPI — GUI 1.2
+
+![Eclipse ESAPI PAM/BAM GUI 1.2 showing the Halcyon 28+29 profile, beam results and plan PAM](docs/images/eclipse-esapi-pam-bam-1.2.png)
 
 ## Definitions
 

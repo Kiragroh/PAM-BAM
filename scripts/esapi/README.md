@@ -5,6 +5,12 @@ with one external photon plan open. Select the target ROI, MLC profile and press
 **Calculate**. Default BEV grid: **2.0 mm**, also selectable at 1.0 and 0.5 mm.
 No other repository source, NuGet package or external process is needed.
 
+![Eclipse running PAM/BAM ESAPI GUI 1.2 with the Halcyon SX profile](../../docs/images/eclipse-esapi-pam-bam-1.2.png)
+
+User-provided screenshot of a successful run: 2.0 mm BEV grid, Auto selecting
+Halcyon SX / 28+29, **PAM 0.5431**, **0.4 s** total. One setup field is excluded.
+Supplied for publication; timings describe this example only.
+
 The GUI shows beam ID, native MLC model, selected profile, MU, CP count, BAM, elapsed seconds per
 field and status, plus the MU-weighted PAM of the complete plan. It provides
 progress, cancellation and invalidation when the ROI, grid or MLC selection changes.
@@ -95,8 +101,9 @@ transfer API objects to workers.
   fixed 28+29 native blocks, asymmetric index regression, disjoint layer openings, 5 mm stagger,
   fixed Halcyon limits, model/mapping/bank guards, zero/decreasing cumulative
   MU and plan aggregation.
-- The user reports Eclipse execution and confirms the **28+29** Halcyon order.
-  Version 1.2 has compile/synthetic verification; a new runtime test is pending.
+- The user confirms successful **version 1.2** execution in Eclipse with the
+  **28+29** Halcyon profile and supplied the screenshot above for publication.
+  The displayed run used a 2.0 mm grid and reported PAM 0.5431 in 0.4 s.
   Compilation, numerical tests and this runtime feedback do not validate every machine configuration or clinical
   accuracy. Test an asymmetric ROI/field at several gantry, collimator and couch
   angles, check MU and native MLC identity/index ordering, and compare 2/1/0.5 mm

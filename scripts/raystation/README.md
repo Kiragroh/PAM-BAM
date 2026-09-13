@@ -5,6 +5,12 @@ CPython with a plan open. Select the target ROI, select 2.0 / 1.0 / 0.5 mm and
 press **Calculate**. No package installation or sibling files are needed if
 NumPy and Tkinter are present in the RayStation Python environment.
 
+![RayStation 2024 running PAM/BAM GUI 1.3](../../docs/images/raystation-pam-bam-1.3.png)
+
+User-provided screenshot of a successful 2024 run: 2.0 mm grid, two treatment
+beams, **PAM 0.5430**, **2.1 s** total. Supplied for publication; timings describe
+this example only.
+
 - BAM for each treatment beam, PAM for the entire open plan using beam MU.
 - Live total/beam timer and a **Seconds** column; the final times remain visible.
 - Select a beam row for separate **API / Surface / Projection / MLC** times,
@@ -95,9 +101,10 @@ The user reports a successful RayStation run of **version 1.0**, with about
 The user also ran **1.1** with the voxel-surface path and reported that it
 remained substantially slower than Eclipse; its 0.5 mm run hit the script's
 16M total-voxel guard. The subsequent **1.2** run on the user's 2024 system
-identified the projection phase as the main remaining cost. **Version 1.3
-needs a new native run.** Neither prior
-runtime feedback nor synthetic tests establish dosimetric
+identified the projection phase as the main remaining cost. The user then
+confirmed a successful **1.3** run in RayStation 2024 and supplied the screenshot
+above: 2.0 mm, 1.2 / 0.8 s per beam and 2.1 s total, with PAM 0.5430.
+Neither runtime feedback nor synthetic tests establish dosimetric
 accuracy, all-machine compatibility or clinical commissioning.
 
 The **38 synthetic tests** cover independent ray/box intersections, analytical
@@ -164,5 +171,6 @@ projection benchmark does not identify the dominant cost inside RayStation.
 python scripts/raystation/tests/benchmark_projection.py
 ```
 
-Tk tests require a desktop session. API documentation basis: v2025 SP2 / 17.2.0.
-The screenshot and clinical plan/ROI names are deliberately not included.
+Tk tests require a desktop session. API documentation basis: v2025 SP2 / 17.2.0;
+the user-confirmed run above used RayStation 2024. Test fixtures contain only
+synthetic geometry and names; the GUI screenshot was supplied by the user for publication.

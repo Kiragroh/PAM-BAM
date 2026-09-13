@@ -24,8 +24,11 @@
   boundary/scanline cases and cache invalidation, eviction and changed leaves.
   An alternating, warmed, 50-view benchmark gave **2.85x / 1.78x / 1.95x**
   projection-only gains at 2 / 1 / 0.5 mm, without cache hits. API, setup,
-  MLC and GUI costs are excluded. Native execution of 1.3 is pending; no
-  wall-clock speed parity with Eclipse is claimed. No helper DLL is shipped.
+  MLC and GUI costs are excluded. The user subsequently confirmed successful
+  **1.3 execution in RayStation 2024**. Their [published screenshot](images/raystation-pam-bam-1.3.png)
+  shows a 2.0 mm grid, BAM 0.6444 / 0.4522, PAM 0.5430 and **2.1 s** total
+  (1.2 / 0.8 s per beam). This is one observed run; no wall-clock speed parity
+  with Eclipse is claimed. No helper DLL is shipped.
   See [RayStation details](../scripts/raystation/README.md) for its source hash
   and the distinction between user runtime feedback and commissioning.
 - ESAPI GUI 1.2 (Auto / TrueBeam SD / HD / Halcyon SX): native x64/.NET Framework
@@ -37,11 +40,15 @@
   The user confirms 28+29 in Eclipse and rejects the other choices from 1.1.
   Those unverified assumptions and the order selector have been removed.
   The earlier 71 synthetic assertions did not establish the native leaf order.
-  Execution of the new 1.2 version inside Eclipse is pending.
+  The user subsequently confirmed successful **1.2 execution in Eclipse** and
+  supplied a [screenshot](images/eclipse-esapi-pam-bam-1.2.png): 2.0 mm grid,
+  Auto / Halcyon SX 28+29, BAM 0.4558 / 0.6407, PAM 0.5431 and **0.4 s** total.
+  These individual runs do not establish equivalence across all TPS geometries.
   See [ESAPI details](../scripts/esapi/README.md).
-- No patient screenshot, identifiers, target names, DICOM or vendor assemblies
-  are included. The earlier library verification below describes the original
-  release, not the later reported RayStation GUI run.
+- Two GUI screenshots supplied by the user for publication are included in
+  the README and TPS usage pages. Test fixtures remain fully synthetic;
+  DICOM and proprietary vendor assemblies are not included. The earlier library
+  verification below describes the original release, not the later GUI runs.
 
 ## Original library release
 
