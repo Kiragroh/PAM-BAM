@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""PAM / BAM viewer 1.2 -- standalone, read-only RayStation file script.
+"""PAM / BAM viewer 1.3 -- standalone, read-only RayStation file script.
 
 Run in RayStation CPython with an open plan; select a target ROI and Calculate.
 Dependencies: numpy, tkinter (no installation or repository import at runtime).
 API basis: RayStation v2025 SP2 / 17.2.0. Local validation is still required.
+The 2024 deployment keeps the existing connect/voxel path; no v2025-only
+native BAM function, compiled helper or additional dependency is used.
 
 AM = fraction of the projected target outside the MLC/jaw opening.
 BAM = sum(AM * Segment.RelativeWeight); PAM = MU-weighted mean of beam BAMs.
@@ -18,6 +20,8 @@ no per-ray 3D traversal and no TPS representation change. In the voxel fallback,
 both voxels and BEV use the selected spacing; for native meshes only BEV changes.
 Voxel reads use bounded slabs with neighbour halos; the requested grid is never
 silently coarsened. Per-beam detail reports API/surface/projection/MLC timings.
+Version 1.3 uses contiguous NumPy scanlines and up to 64 MiB of projected-target
+cache per surface, for exactly matching views within the current calculation.
 Compare resolutions and the displayed surface method when comparing results.
 Lengths from RayStation are cm throughout; only the GUI spacing is in mm.
 
@@ -60,13 +64,16 @@ SOFTWARE.
 import itertools
 import math
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 import numpy as np
 
-VERSION = "1.2"
+VERSION = "1.3"
 MAX_VOXELS = 16_000_000
 MAX_BEV_PIXELS = 600_000
 MAX_SURFACE_FACES = 1_000_000
+MAX_PROJECTION_CACHE_BYTES = 64 * 1024 * 1024
+MAX_SCANLINE_ROWS = 65_536
 
 
 class CalculationError(Exception):
@@ -241,6 +248,9 @@ class Surface:
         self.spacing = finite(spacing)
         require(self.spacing > 0, "Positive BEV spacing required.")
         self.method = method
+        # Per-calculation only: the GUI discards every Surface after Calculate.
+        self.projections = OrderedDict()
+        self.projection_bytes = 0
 
 
 def voxel_faces(volume, pulse=lambda: None, core_z=None):
@@ -369,63 +379,98 @@ def read_surface(geometry, spacing, pulse=lambda: None, timings=None):
 
 
 def project_surface(surface, iso, sad, frame, pulse=lambda: None):
-    """Perspective surface projection with vectorized polygon scanlines.
+    """Perspective projection with bounded, contiguous NumPy scanline arrays.
 
-    Each convex face contributes inclusive BEV pixel-centre intervals. Their
-    union is accumulated with scanline differences, not a loop over 3D voxels.
+    Same inclusive pixel-centre intervals and tolerances as version 1.2. One
+    matrix multiply replaces thousands of tiny matrix multiplies. Coordinate
+    arrays are contiguous; edge-wise vectors avoid repeated Nx4 temporaries.
     """
     step = surface.spacing
-    local = (surface.faces - iso) @ frame
-    distance = sad - local[:, :, 2]
+    pulse()
+    local = frame.T @ (surface.faces.reshape(-1, 3) - iso).T
+    distance = sad - local[2]
     require(np.all(distance > 1.0), "ROI is at or beyond the source plane.")
-    bev = local[:, :, :2] * (sad / distance[:, :, None])
-    lo = np.floor(bev.min(axis=(0, 1)) / step).astype(int)
-    hi = np.ceil(bev.max(axis=(0, 1)) / step).astype(int)
+    scale = sad / distance
+    px, py = local[0]*scale, local[1]*scale
+    lo = np.floor(np.array([px.min(), py.min()]) / step).astype(int)
+    hi = np.ceil(np.array([px.max(), py.max()]) / step).astype(int)
     width, height = hi - lo
     require(width > 0 and height > 0 and int(width)*int(height) <= MAX_BEV_PIXELS,
             "Projection too large: choose a coarser resolution.")
-    polygons = bev / step - lo - .5
+    xx = (px/step - lo[0] - .5).reshape(surface.faces.shape[:2]).T.copy()
+    yy = (py/step - lo[1] - .5).reshape(surface.faces.shape[:2]).T.copy()
+    del local, distance, scale, px, py
     differences = np.zeros((height, width + 1), dtype=np.int32)
-    batch = max(1, min(512, 100_000 // int(height)))
-    for start in range(0, len(polygons), batch):
+    for start in range(0, xx.shape[1], 8192):
         pulse()
-        poly = polygons[start:start+batch]
-        x, y = poly[:, :, 0], poly[:, :, 1]
-        xn, yn = np.roll(x, -1, axis=1), np.roll(y, -1, axis=1)
-        area = np.abs(np.sum(x*yn-xn*y, axis=1))
-        keep = area > 1e-10
-        x, y, xn, yn = x[keep], y[keep], xn[keep], yn[keep]
-        if not len(x):
-            continue
-        low = np.maximum(0, np.ceil(y.min(axis=1)-1e-9).astype(int))
-        high = np.minimum(height-1, np.floor(y.max(axis=1)+1e-9).astype(int))
-        counts = np.maximum(0, high-low+1)
-        ids = np.repeat(np.arange(len(x)), counts)
-        rows = np.repeat(low, counts) + np.arange(counts.sum()) - np.repeat(np.cumsum(counts)-counts, counts)
-        if not len(ids):
-            continue
-        yy = rows[:, None]
-        dy = yn[ids]-y[ids]
-        nonhorizontal = np.abs(dy) > 1e-12
-        valid = nonhorizontal & (yy >= np.minimum(y[ids], yn[ids])-1e-9) & (yy <= np.maximum(y[ids], yn[ids])+1e-9)
-        crossing = x[ids] + (yy-y[ids]) * (xn[ids]-x[ids]) / np.where(nonhorizontal, dy, 1)
-        left = np.min(np.where(valid, crossing, np.inf), axis=1)
-        right = np.max(np.where(valid, crossing, -np.inf), axis=1)
-        horizontal = ~nonhorizontal & (np.abs(yy-y[ids]) <= 1e-9)
-        left = np.minimum(left, np.min(np.where(horizontal, np.minimum(x[ids], xn[ids]), np.inf), axis=1))
-        right = np.maximum(right, np.max(np.where(horizontal, np.maximum(x[ids], xn[ids]), -np.inf), axis=1))
-        valid = np.isfinite(left) & np.isfinite(right)
-        rows, left, right = rows[valid], left[valid], right[valid]
-        first = np.maximum(0, np.ceil(left-1e-9).astype(int))
-        last = np.minimum(width-1, np.floor(right+1e-9).astype(int))
-        valid = first <= last
-        np.add.at(differences, (rows[valid], first[valid]), 1)
-        np.add.at(differences, (rows[valid], last[valid]+1), -1)
+        x, y = xx[:, start:start+8192], yy[:, start:start+8192]
+        xn, yn = np.roll(x, -1, axis=0), np.roll(y, -1, axis=0)
+        area = np.abs(np.sum(x*yn-xn*y, axis=0))
+        low = np.maximum(0, np.ceil(y.min(axis=0)-1e-9).astype(int))
+        high = np.minimum(height-1, np.floor(y.max(axis=0)+1e-9).astype(int))
+        counts = np.where(area > 1e-10, np.maximum(0, high-low+1), 0)
+        cumulative = np.cumsum(counts)
+        first_face = 0
+        while first_face < len(counts):
+            pulse()
+            before = cumulative[first_face-1] if first_face else 0
+            stop = max(first_face+1, int(np.searchsorted(
+                cumulative, before+MAX_SCANLINE_ROWS, side="right")))
+            n = counts[first_face:stop]
+            ids = np.repeat(np.arange(first_face, stop), n)
+            rows = (np.repeat(low[first_face:stop], n) + np.arange(n.sum())
+                    - np.repeat(cumulative[first_face:stop]-n-before, n))
+            first_face = stop
+            if not len(ids):
+                continue
+            # A single very tall face may exceed the row budget; its span is
+            # still bounded by the existing MAX_BEV_PIXELS limit.
+            left, right = np.full(len(ids), np.inf), np.full(len(ids), -np.inf)
+            for edge in range(x.shape[0]):
+                a, b, c, d = x[edge, ids], y[edge, ids], xn[edge, ids], yn[edge, ids]
+                dy = d-b
+                nonhorizontal = np.abs(dy) > 1e-12
+                valid = (nonhorizontal & (rows >= np.minimum(b, d)-1e-9)
+                         & (rows <= np.maximum(b, d)+1e-9))
+                crossing = a + (rows-b)*(c-a) / np.where(nonhorizontal, dy, 1)
+                left = np.minimum(left, np.where(valid, crossing, np.inf))
+                right = np.maximum(right, np.where(valid, crossing, -np.inf))
+                horizontal = ~nonhorizontal & (np.abs(rows-b) <= 1e-9)
+                left = np.minimum(left, np.where(horizontal, np.minimum(a, c), np.inf))
+                right = np.maximum(right, np.where(horizontal, np.maximum(a, c), -np.inf))
+            valid = np.isfinite(left) & np.isfinite(right)
+            rows, left, right = rows[valid], left[valid], right[valid]
+            first = np.maximum(0, np.ceil(left-1e-9).astype(int))
+            last = np.minimum(width-1, np.floor(right+1e-9).astype(int))
+            valid = first <= last
+            np.add.at(differences, (rows[valid], first[valid]), 1)
+            np.add.at(differences, (rows[valid], last[valid]+1), -1)
     pulse()
     occupied = np.cumsum(differences[:, :-1], axis=1) > 0
     j, i = np.nonzero(occupied)
     require(len(i) > 0, "Empty target projection: choose a finer grid.")
     return (i+lo[0]+.5)*step, (j+lo[1]+.5)*step
+
+
+def cached_target(surface, iso, sad, frame, pulse, timings):
+    """Reuse only exactly matching target geometry; never cache CP apertures."""
+    key = (np.asarray(iso, dtype=float).tobytes(), float(sad),
+           np.asarray(frame, dtype=float).tobytes(), surface.spacing)
+    target = surface.projections.get(key)
+    if target is not None:
+        surface.projections.move_to_end(key)
+        return target, True
+    with timings.measure("Projection"):
+        target = project_surface(surface, iso, sad, frame, pulse)
+    size = sum(a.nbytes for a in target)
+    if size <= MAX_PROJECTION_CACHE_BYTES:
+        while surface.projections and (surface.projection_bytes+size > MAX_PROJECTION_CACHE_BYTES
+                                       or len(surface.projections) >= 128):
+            _, old = surface.projections.popitem(last=False)
+            surface.projection_bytes -= sum(a.nbytes for a in old)
+        surface.projections[key] = target
+        surface.projection_bytes += size
+    return target, False
 
 
 def prepare_aperture(x, y, layers, axis):
@@ -585,6 +630,7 @@ def calculate_beam(beam, machine_db, volume, pulse=lambda: None, progress=lambda
         sad, layers, axis, has_jaws = model_for_beam(beam, machine_db)
         iso = xyz(beam.Isocenter.Position)
     modulation = []
+    reused = 0
     previous_frame, target, lookup = None, None, None
     for i, (segment, weight, gantry) in enumerate(zip(segments, weights, angles)):
         progress(i+1, len(segments))
@@ -598,14 +644,19 @@ def calculate_beam(beam, machine_db, volume, pulse=lambda: None, progress=lambda
             jaws = segment.JawPositions if has_jaws else None
         frame = beam_frame(gantry, couch, collimator)
         if previous_frame is None or not np.allclose(frame, previous_frame, rtol=0, atol=1e-12):
-            with timings.measure("Projection"):
-                target = project_target(volume, iso, sad, frame, pulse)
+            if isinstance(volume, Surface):
+                target, hit = cached_target(volume, iso, sad, frame, pulse, timings)
+                reused += int(hit)
+            else:
+                with timings.measure("Projection"):
+                    target = project_target(volume, iso, sad, frame, pulse)
             with timings.measure("MLC"):
                 lookup = prepare_aperture(*target, layers, axis)
             previous_frame = frame
         with timings.measure("MLC"):
             opened = aperture_open(*target, layers, banks, axis, jaws, lookup)
             modulation.append(1.0 - float(np.count_nonzero(opened)) / len(opened))
+    timings.notes.append("{} cached projection(s) reused; only exact matching views".format(reused))
     return weighted_mean(modulation, weights), len(segments)
 
 
@@ -839,7 +890,7 @@ def main():
     except Exception as exc:
         messagebox.showerror("PAM / BAM", str(exc) if isinstance(exc, CalculationError) else
                              "Run this file in RayStation CPython with an open plan.\n"
-                             "Required: numpy and tkinter. API basis: v2025 SP2.", parent=root)
+                             "Required: numpy and tkinter. Supports the existing connect import.", parent=root)
         root.destroy()
 
 

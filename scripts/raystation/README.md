@@ -1,4 +1,4 @@
-# RayStation simple GUI 1.2
+# RayStation simple GUI 1.3
 
 Download **[PAM_BAM.py](PAM_BAM.py)** and run it as a file script in RayStation
 CPython with a plan open. Select the target ROI, select 2.0 / 1.0 / 0.5 mm and
@@ -8,7 +8,7 @@ NumPy and Tkinter are present in the RayStation Python environment.
 - BAM for each treatment beam, PAM for the entire open plan using beam MU.
 - Live total/beam timer and a **Seconds** column; the final times remain visible.
 - Select a beam row for separate **API / Surface / Projection / MLC** times,
-  projection count, ROI grid dimensions, block count and surface-face count.
+  projection/reuse counts, ROI grid dimensions, block count and surface-face count.
 - Surface projection with a **2.0 mm default** grid, also selectable at 1.0/0.5 mm.
 - Read-only: no patient save, contour change, dose calculation or export.
 - Divergent target projection at every CP; actual MLC strip widths and centres;
@@ -56,6 +56,21 @@ Version 1.2 also caches each projection's sample-to-leaf mapping. Each CP then
 compares samples with their associated leaf tips, instead of testing every
 sample against every leaf. Gaps, stagger, native ordering and layer-intersection
 semantics are preserved.
+
+Version 1.3 keeps the existing Python/NumPy/Tkinter deployment for RayStation
+2024. It adds no DLL, package installation, local-folder requirement or
+v2025-only native BAM API. The projector performs one large matrix multiply,
+uses contiguous coordinate arrays and processes polygon edges in bounded
+scanline batches. The raster, divergent geometry, edge tolerances, MLC/jaw
+rules and MU weights are retained.
+
+Identical target projections can also be reused across beams. The cache key
+includes the exact isocenter, SAD, full beam frame and grid spacing; each target
+surface owns its cache. It holds at most 64 MiB / 128 views per surface and is
+discarded after Calculate. Different views are recalculated without angle
+rounding; changed CP leaves/jaws always receive a fresh aperture evaluation.
+The detail panel reports actual projection calls and cache hits separately.
+
 All API access remains on the script thread. The timer updates during the
 calculation through Tk event processing (about every 100 ms). A synchronous
 native API read can temporarily block repainting; elapsed time includes that
@@ -79,21 +94,50 @@ The user reports a successful RayStation run of **version 1.0**, with about
 `D8060D8E376046431D0328DB31258C9C1291FB05846D9C5C4ECAAEBE0C13B0A9`).
 The user also ran **1.1** with the voxel-surface path and reported that it
 remained substantially slower than Eclipse; its 0.5 mm run hit the script's
-16M total-voxel guard. **Version 1.2 needs a new native run.** Neither prior
+16M total-voxel guard. The subsequent **1.2** run on the user's 2024 system
+identified the projection phase as the main remaining cost. **Version 1.3
+needs a new native run.** Neither prior
 runtime feedback nor synthetic tests establish dosimetric
 accuracy, all-machine compatibility or clinical commissioning.
 
-The **32 synthetic tests** cover independent ray/box intersections, analytical
+The **38 synthetic tests** cover independent ray/box intersections, analytical
 perspective projection, holes/disconnected targets, MLC/jaw intersections,
 MU weights, changing CP angles, API guards and Tk GUI calculation/cancellation,
 native mesh reading, surface-vs-ray comparison at oblique angles, and the timer.
 New regressions cover a 0.5 mm grid above 16M voxels, bounded native requests at
 unchanged spacing, holes across slab boundaries, cached strip lookup against an
 independent union calculation, and phase timing with simulated API delay.
+Version 1.3 adds 720 exact-mask comparisons against the frozen 1.2 projector:
+triangles/quads, holes/disconnected components, 2/1/0.5 mm grids, oblique and
+cardinal views, translated targets, X/Y leaf travel, 28+29 dual layers, jaws and
+changing MU weights. All compared BAM/PAM values are identical. Additional
+tests cover silhouette boundaries, nearly horizontal edges, scanline batching,
+cache invalidation/eviction and changed leaves despite a reused target.
 They contain only synthetic geometry and names:
 
 ```text
-python scripts/raystation/tests/test_pam_bam.py
+python -B -m unittest discover -s scripts/raystation/tests -p "test_*.py" -v
+```
+
+## NumPy speed comparison (1.3 versus 1.2)
+
+Synthetic sphere with a through-hole, 8 cm box, 50 gantry views, 27-degree
+collimator. Python 3.13.13, NumPy 2.4.4, Windows x64. Median of three timed
+repetitions after warm-up; old/new order alternates. Every occupied sample
+matched exactly. No cache hits were used in this benchmark.
+
+| Grid | Faces | 1.2 projection | 1.3 projection | Speedup |
+|---|---:|---:|---:|---:|
+| 2.0 mm | 2,536 | 0.111 s | 0.039 s | 2.85x |
+| 1.0 mm | 10,248 | 0.511 s | 0.287 s | 1.78x |
+| 0.5 mm | 40,856 | 1.873 s | 0.961 s | 1.95x |
+
+These are projection-only CPU times, excluding surface preparation, API,
+MLC and GUI costs. They do not predict the complete RayStation 2024 runtime.
+Use the unchanged total/beam timer and phase details for that comparison.
+
+```text
+python -B scripts/raystation/tests/benchmark_numpy.py
 ```
 
 ## Earlier projection-only speed comparison (1.1)

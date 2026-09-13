@@ -15,7 +15,17 @@
   sample-to-strip lookup, and displays per-beam API/surface/projection/MLC times.
   **32 synthetic tests passed**, including an above-16M 0.5 mm ROI, unchanged
   sampling, holes at slab interfaces and phase timing with simulated API delay.
-  New execution of 1.2 inside RayStation is pending; no speed parity is claimed.
+  The subsequent user run of 1.2 on their 2024 system identified projection as
+  the dominant phase. GUI 1.3 remains a single Python file: contiguous NumPy
+  processing, bounded scanline batches and a 64 MiB / 128-view cache per target
+  surface, limited to exactly matching views within the current calculation.
+  **38 synthetic tests passed**, including **720 exact-mask comparisons**
+  against the frozen 1.2 projector with identical compared BAM/PAM values,
+  boundary/scanline cases and cache invalidation, eviction and changed leaves.
+  An alternating, warmed, 50-view benchmark gave **2.85x / 1.78x / 1.95x**
+  projection-only gains at 2 / 1 / 0.5 mm, without cache hits. API, setup,
+  MLC and GUI costs are excluded. Native execution of 1.3 is pending; no
+  wall-clock speed parity with Eclipse is claimed. No helper DLL is shipped.
   See [RayStation details](../scripts/raystation/README.md) for its source hash
   and the distinction between user runtime feedback and commissioning.
 - ESAPI GUI 1.2 (Auto / TrueBeam SD / HD / Halcyon SX): native x64/.NET Framework
