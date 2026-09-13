@@ -12,13 +12,13 @@ clinically commissioned software.
 
 | TPS | Standalone script | Current test status |
 |---|---|---|
-| RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | User reports successful execution; about 4 s/field at 2 mm |
-| Eclipse / ESAPI, SD / HD / Halcyon SX | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | GUI 1.1: ESAPI 18 compile; 71 synthetic assertions; native test/mapping validation pending |
+| RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | GUI 1.1: surface projection + live timer; 28 synthetic tests; new native test pending |
+| Eclipse / ESAPI, SD / HD / Halcyon SX | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | GUI 1.2: ESAPI 18 compile; 65 synthetic assertions; fixed user-confirmed 28+29 Halcyon order |
 
 The ESAPI GUI offers Auto, TrueBeam SD (Millennium 120), TrueBeam HD (HD120) and
 Halcyon SX dual-layer profiles, using the native target mesh and cumulative CP
-weights. The default BEV grid is 2 mm. For dual-layer use, select the locally
-verified native leaf order explicitly. It reports BAM, plan PAM and elapsed
+weights. The default BEV grid is 2 mm. Halcyon uses the user-confirmed native
+order: 28 pairs followed by 29. It reports BAM, plan PAM and elapsed
 time per field. See [ESAPI usage and scope](scripts/esapi/README.md).
 
 [RayStation: PAM_BAM.py](scripts/raystation/PAM_BAM.py) is a standalone, read-only
@@ -30,7 +30,8 @@ package does not have to be installed.
 **Runtime feedback:** the user successfully ran GUI version 1.0 in RayStation
 and reported approximately **4 seconds per field at a 2 mm grid**. This is one
 reported application run, not a universal benchmark or commissioning result.
-The exact tested script is included unchanged. No clinical screenshot, plan
+The tested 1.0 script is preserved in Git history; the current 1.1 adds surface
+projection and a live timer. No clinical screenshot, plan
 identifiers or target names are published. See [usage and validation](scripts/raystation/README.md).
 
 ## Definitions

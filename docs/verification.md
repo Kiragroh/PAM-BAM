@@ -4,15 +4,24 @@
 
 - RayStation GUI 1.0: **22 synthetic tests passed**, including the Tk UI.
   The user subsequently reported successful native execution and approximately
-  **4 seconds per field with a 2 mm grid**. The exact tested source is included.
+  **4 seconds per field with a 2 mm grid**. The tested 1.0 source is preserved
+  in Git history. GUI 1.1 adds surface projection and a live total/beam timer;
+  **28 synthetic tests passed**, including oblique comparisons against the old
+  ray traversal and native mesh reading. A five-view 0.5 mm synthetic benchmark
+  gave 9.9x faster projection (3.1x including surface setup), with identical BEV
+  samples. New execution inside RayStation is pending.
   See [RayStation details](../scripts/raystation/README.md) for its source hash
   and the distinction between user runtime feedback and commissioning.
-- ESAPI GUI 1.1 (Auto / TrueBeam SD / HD / Halcyon SX): native x64/.NET Framework
+- ESAPI GUI 1.2 (Auto / TrueBeam SD / HD / Halcyon SX): native x64/.NET Framework
   4.8 compile against ESAPI API file version **18.0.1.261** passed;
-  **71 synthetic numerical assertions passed**. These include SD/HD widths,
-  dual-layer intersection and stagger, three explicitly selected index mappings,
+  **65 synthetic numerical assertions passed**. These include SD/HD widths,
+  dual-layer intersection and stagger, fixed 28+29 native blocks with asymmetric
+  regression inputs independent of the implementation's mapping,
   fixed Halcyon limits and rejection of missing/duplicate/conflicting mappings.
-  Execution inside Eclipse and the site's dual-layer index mapping are pending.
+  The user confirms 28+29 in Eclipse and rejects the other choices from 1.1.
+  Those unverified assumptions and the order selector have been removed.
+  The earlier 71 synthetic assertions did not establish the native leaf order.
+  Execution of the new 1.2 version inside Eclipse is pending.
   See [ESAPI details](../scripts/esapi/README.md).
 - No patient screenshot, identifiers, target names, DICOM or vendor assemblies
   are included. The earlier library verification below describes the original

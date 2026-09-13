@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PAM / BAM viewer 1.0 -- standalone, read-only RayStation file script.
+"""PAM / BAM viewer 1.1 -- standalone, read-only RayStation file script.
 
 Run in RayStation CPython with an open plan; select a target ROI and Calculate.
 Dependencies: numpy, tkinter (no installation or repository import at runtime).
@@ -11,10 +11,12 @@ RelativeWeight is documented by RS as a fraction of total beam MU, NOT a
 cumulative meterset. Dynamic delivery is sampled at the native segments/CPs;
 there is no reconstruction of continuous leaf travel or dose calculation.
 
-The entire ROI is voxelized on the planning examination (>=128/255 occupancy).
-Perspective ray tracing projects that binary volume onto the isocenter plane.
-Both ROI voxels and BEV sampling use the selected spacing. Values therefore
-depend on resolution; compare 1.0 and 0.5 mm when assessing convergence.
+An available closed native triangle mesh is projected directly. Otherwise the
+ROI is voxelized (>=128/255 occupancy) and its exact block surface is extracted
+in memory. Both paths project surface polygons onto the isocenter BEV plane;
+no per-ray 3D traversal and no TPS representation change. In the voxel fallback,
+both voxels and BEV use the selected spacing; for native meshes only BEV changes.
+Compare resolutions and the displayed surface method when comparing results.
 Lengths from RayStation are cm throughout; only the GUI spacing is in mm.
 
 Supported: photon SMLC/DMLC/DynamicArc/StaticArc, HFS, conventional IEC geometry,
@@ -55,11 +57,13 @@ SOFTWARE.
 
 import itertools
 import math
+import time
 import numpy as np
 
-VERSION = "1.0"
+VERSION = "1.1"
 MAX_VOXELS = 16_000_000
 MAX_BEV_PIXELS = 600_000
+MAX_SURFACE_FACES = 1_000_000
 
 
 class CalculationError(Exception):
@@ -179,6 +183,9 @@ def ray_hits(mask, corner, spacing, source, directions, pulse=lambda: None):
 
 
 def project_target(volume, iso, sad, frame, pulse=lambda: None):
+    if isinstance(volume, Surface):
+        return project_surface(volume, iso, sad, frame, pulse)
+    # Retained reference path for independent numerical comparison.
     mask, corner, spacing = volume
     upper = corner + np.array(mask.shape[::-1]) * spacing
     corners = np.array(list(itertools.product(*zip(corner, upper))))
@@ -199,6 +206,140 @@ def project_target(volume, iso, sad, frame, pulse=lambda: None):
     hits = ray_hits(mask, corner, spacing, source, directions, pulse)
     require(bool(hits.any()), "Empty target projection: choose a finer grid.")
     return x[hits], y[hits]
+
+
+class Surface:
+    def __init__(self, faces, spacing, method):
+        self.faces = np.asarray(faces, dtype=float)
+        require(self.faces.ndim == 3 and self.faces.shape[1] in (3, 4)
+                and self.faces.shape[2] == 3 and 0 < len(self.faces) <= MAX_SURFACE_FACES
+                and np.isfinite(self.faces).all(), "Invalid target surface.")
+        self.spacing = finite(spacing)
+        require(self.spacing > 0, "Positive BEV spacing required.")
+        self.method = method
+
+
+def voxel_surface(volume, pulse=lambda: None):
+    """Exact exposed voxel faces, merged only within a coplanar rectangle.
+
+    This preserves the thresholded volume, holes and disconnected components.
+    It does not smooth, decimate, dilate, or take a convex hull.
+    """
+    mask, corner, spacing = volume
+    faces = []
+    for axis in range(3):
+        a = np.moveaxis(mask, axis, 0)
+        changes = np.diff(np.pad(a.astype(np.int8), ((1, 1), (0, 0), (0, 0))), axis=0)
+        other = [k for k in range(3) if k != axis]
+        for plane in np.flatnonzero(np.any(changes != 0, axis=(1, 2))):
+            pulse()
+            boundary = changes[plane] != 0
+            runs = np.diff(np.pad(boundary.astype(np.int8), ((0, 0), (1, 1))), axis=1)
+            active = {}
+            rectangles = []
+            for row in range(boundary.shape[0] + 1):
+                intervals = set() if row == boundary.shape[0] else set(zip(
+                    np.flatnonzero(runs[row] == 1), np.flatnonzero(runs[row] == -1)))
+                for interval in list(active):
+                    if interval not in intervals:
+                        rectangles.append((active.pop(interval), row, *interval))
+                for interval in intervals:
+                    active.setdefault(interval, row)
+            for r0, r1, c0, c1 in rectangles:
+                require(len(faces) < MAX_SURFACE_FACES, "Target surface too large: choose a coarser resolution.")
+                face = np.zeros((4, 3))
+                face[:, axis] = plane
+                face[:, other[0]] = [r0, r0, r1, r1]
+                face[:, other[1]] = [c0, c1, c1, c0]
+                faces.append(corner + spacing * face[:, ::-1])
+    return Surface(faces, spacing, "Voxel surface")
+
+
+def read_surface(geometry, spacing, pulse=lambda: None):
+    require(geometry.HasContours(), "Selected target has no geometry.")
+    pulse()
+    # PrimaryShape may be Contours/BinaryRoi instead. Probe only documented
+    # read properties; never call SetRepresentation or create a temporary ROI.
+    try:
+        shape = geometry.PrimaryShape
+        native_vertices, native_indices, closed = shape.Vertices, shape.Indices, shape.IsClosed
+    except Exception:
+        return voxel_surface(voxelize(geometry, spacing), pulse)
+    require(bool(closed), "Native target mesh is not closed.")
+    require(len(native_indices) <= 3*MAX_SURFACE_FACES, "Native target mesh exceeds the surface size limit.")
+    vertices = []
+    for i, vertex in enumerate(native_vertices):
+        if i % 2048 == 0:
+            pulse()
+        vertices.append(xyz(vertex))
+    vertices = np.array(vertices)
+    indices = np.asarray(native_indices)
+    require(vertices.ndim == 2 and vertices.shape[1] == 3
+            and indices.ndim == 1 and indices.size >= 12 and indices.size % 3 == 0
+            and np.issubdtype(indices.dtype, np.integer)
+            and np.all((indices >= 0) & (indices < len(vertices))), "Invalid native mesh indices.")
+    pulse()
+    return Surface(vertices[indices.reshape(-1, 3)], spacing, "Native mesh")
+
+
+def project_surface(surface, iso, sad, frame, pulse=lambda: None):
+    """Perspective surface projection with vectorized polygon scanlines.
+
+    Each convex face contributes inclusive BEV pixel-centre intervals. Their
+    union is accumulated with scanline differences, not a loop over 3D voxels.
+    """
+    step = surface.spacing
+    local = (surface.faces - iso) @ frame
+    distance = sad - local[:, :, 2]
+    require(np.all(distance > 1.0), "ROI is at or beyond the source plane.")
+    bev = local[:, :, :2] * (sad / distance[:, :, None])
+    lo = np.floor(bev.min(axis=(0, 1)) / step).astype(int)
+    hi = np.ceil(bev.max(axis=(0, 1)) / step).astype(int)
+    width, height = hi - lo
+    require(width > 0 and height > 0 and int(width)*int(height) <= MAX_BEV_PIXELS,
+            "Projection too large: choose a coarser resolution.")
+    polygons = bev / step - lo - .5
+    differences = np.zeros((height, width + 1), dtype=np.int32)
+    batch = max(1, min(512, 100_000 // int(height)))
+    for start in range(0, len(polygons), batch):
+        pulse()
+        poly = polygons[start:start+batch]
+        x, y = poly[:, :, 0], poly[:, :, 1]
+        xn, yn = np.roll(x, -1, axis=1), np.roll(y, -1, axis=1)
+        area = np.abs(np.sum(x*yn-xn*y, axis=1))
+        keep = area > 1e-10
+        x, y, xn, yn = x[keep], y[keep], xn[keep], yn[keep]
+        if not len(x):
+            continue
+        low = np.maximum(0, np.ceil(y.min(axis=1)-1e-9).astype(int))
+        high = np.minimum(height-1, np.floor(y.max(axis=1)+1e-9).astype(int))
+        counts = np.maximum(0, high-low+1)
+        ids = np.repeat(np.arange(len(x)), counts)
+        rows = np.repeat(low, counts) + np.arange(counts.sum()) - np.repeat(np.cumsum(counts)-counts, counts)
+        if not len(ids):
+            continue
+        yy = rows[:, None]
+        dy = yn[ids]-y[ids]
+        nonhorizontal = np.abs(dy) > 1e-12
+        valid = nonhorizontal & (yy >= np.minimum(y[ids], yn[ids])-1e-9) & (yy <= np.maximum(y[ids], yn[ids])+1e-9)
+        crossing = x[ids] + (yy-y[ids]) * (xn[ids]-x[ids]) / np.where(nonhorizontal, dy, 1)
+        left = np.min(np.where(valid, crossing, np.inf), axis=1)
+        right = np.max(np.where(valid, crossing, -np.inf), axis=1)
+        horizontal = ~nonhorizontal & (np.abs(yy-y[ids]) <= 1e-9)
+        left = np.minimum(left, np.min(np.where(horizontal, np.minimum(x[ids], xn[ids]), np.inf), axis=1))
+        right = np.maximum(right, np.max(np.where(horizontal, np.maximum(x[ids], xn[ids]), -np.inf), axis=1))
+        valid = np.isfinite(left) & np.isfinite(right)
+        rows, left, right = rows[valid], left[valid], right[valid]
+        first = np.maximum(0, np.ceil(left-1e-9).astype(int))
+        last = np.minimum(width-1, np.floor(right+1e-9).astype(int))
+        valid = first <= last
+        np.add.at(differences, (rows[valid], first[valid]), 1)
+        np.add.at(differences, (rows[valid], last[valid]+1), -1)
+    pulse()
+    occupied = np.cumsum(differences[:, :-1], axis=1) > 0
+    j, i = np.nonzero(occupied)
+    require(len(i) > 0, "Empty target projection: choose a finer grid.")
+    return (i+lo[0]+.5)*step, (j+lo[1]+.5)*step
 
 
 def aperture_open(x, y, layers, banks, axis, jaws):
@@ -351,6 +492,9 @@ class Viewer:
     def __init__(self, root, case, plan, machine_db, tk, ttk):
         self.root, self.case, self.plan, self.machine_db = root, case, plan, machine_db
         self.running = self.cancelled = False
+        self.started = self.beam_started = self.stopped = None
+        self.active_row = self.timer_job = None
+        self.last_pulse = 0.0
         root.title("PAM / BAM  " + VERSION)
         root.geometry("1000x560")
         root.minsize(800, 450)
@@ -366,7 +510,7 @@ class Viewer:
         require(bool(names), "No ROIs available in the current case.")
         default = next((str(r.Name) for r in rois if str(r.Type) == "Ptv"), names[0])
         self.roi = tk.StringVar(value=default)
-        self.resolution = tk.StringVar(value="1.0")
+        self.resolution = tk.StringVar(value="2.0")
         ttk.Label(controls, text="Target ROI").pack(side="left")
         self.roi_box = ttk.Combobox(controls, textvariable=self.roi, values=names, state="readonly", width=30)
         self.roi_box.pack(side="left", padx=(8, 16))
@@ -379,10 +523,10 @@ class Viewer:
         self.cancel_button.pack(side="left")
         table_frame = ttk.Frame(panel)
         table_frame.pack(fill="both", expand=True, pady=(16, 8))
-        columns = ("set", "beam", "mu", "cp", "bam", "status")
+        columns = ("set", "beam", "mu", "cp", "bam", "seconds", "status")
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
-        for col, title, width in zip(columns, ("Beam set", "Beam", "MU", "CPs", "BAM", "Status"),
-                                     (125, 130, 80, 55, 105, 430)):
+        for col, title, width in zip(columns, ("Beam set", "Beam", "MU", "CPs", "BAM", "Seconds", "Status"),
+                                     (125, 100, 80, 55, 85, 75, 400)):
             self.table.heading(col, text=title)
             self.table.column(col, width=width, minwidth=45, stretch=col == "status")
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
@@ -391,6 +535,8 @@ class Viewer:
         self.table.pack(side="left", fill="both", expand=True)
         self.pam = tk.StringVar(value="Plan PAM: —")
         ttk.Label(panel, textvariable=self.pam, font=("Segoe UI", 17, "bold")).pack(anchor="w", pady=6)
+        self.elapsed = tk.StringVar(value="Elapsed: 0.0 s")
+        ttk.Label(panel, textvariable=self.elapsed).pack(anchor="w")
         self.status = tk.StringVar(value="Select the same target ROI for all treatment beams in the open plan.")
         ttk.Label(panel, textvariable=self.status, wraplength=940).pack(anchor="w", pady=4)
         self.detail = tk.StringVar(value="Select a beam row to read its full status.")
@@ -407,6 +553,7 @@ class Viewer:
         self.pam.set("Plan PAM: —")
         self.status.set("Selection changed. Press Calculate to update the results.")
         self.detail.set("")
+        self.elapsed.set("Elapsed: 0.0 s")
 
     def show_detail(self, event=None):
         rows = self.table.selection()
@@ -424,14 +571,35 @@ class Viewer:
             self.root.destroy()
 
     def pulse(self):
-        self.root.update()
+        now = time.perf_counter()
+        if now-self.last_pulse >= .05:
+            self.last_pulse = now
+            self.root.update()
         if self.cancelled:
             raise Cancelled()
+
+    def tick(self):
+        now = self.stopped if self.stopped is not None else time.perf_counter()
+        if self.started is not None:
+            text = "Elapsed: {:.1f} s".format(now-self.started)
+            if self.beam_started is not None:
+                seconds = now-self.beam_started
+                text += " | Current beam: {:.1f} s".format(seconds)
+                if self.active_row is not None:
+                    self.table.set(self.active_row, "seconds", "{:.1f}".format(seconds))
+            self.elapsed.set(text)
+        if self.running:
+            self.timer_job = self.root.after(100, self.tick)
 
     def calculate(self):
         if self.running:
             return
         self.running, self.cancelled = True, False
+        self.started = time.perf_counter()
+        self.beam_started = self.stopped = None
+        self.active_row = None
+        self.last_pulse = 0.0
+        self.tick()
         self.calculate_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.roi_box.configure(state="disabled")
@@ -450,18 +618,19 @@ class Viewer:
                 for beam in beamset.Beams:
                     self.pulse()
                     label, name = str(beamset.DicomPlanLabel), str(beam.Name)
-                    row = self.table.insert("", "end", values=(label, name, "—", "—", "—", "Reading…"))
+                    row = self.table.insert("", "end", values=(label, name, "—", "—", "—", "0.0", "Reading…"))
+                    self.active_row, self.beam_started = row, time.perf_counter()
                     mu = None
                     try:
                         if str(beam.DeliveryTechnique) == "Setup":
                             excluded += 1
-                            self.table.item(row, values=(label, name, "—", "—", "—", "Setup beam excluded"))
+                            self.table.item(row, values=(label, name, "—", "—", "—", "—", "Setup beam excluded"))
                             continue
                         mu = finite(beam.BeamMU)
                         require(mu >= 0, "Negative beam MU.")
                         if mu == 0:
                             excluded += 1
-                            self.table.item(row, values=(label, name, "0", "—", "—", "Zero-MU beam excluded"))
+                            self.table.item(row, values=(label, name, "0", "—", "—", "—", "Zero-MU beam excluded"))
                             continue
                         total += 1
                         require(str(beamset.Modality) == "Photons", "Only photon beam sets are supported.")
@@ -469,33 +638,37 @@ class Viewer:
                         exam = beamset.GetPlanningExamination()
                         exams.add(str(exam.Name))
                         if str(exam.Name) not in volumes:
-                            self.status.set("Reading and voxelizing the selected target ROI…")
+                            self.status.set("Reading the target and preparing its surface…")
                             self.pulse()
                             geometry = self.case.PatientModel.StructureSets[exam.Name].RoiGeometries[roi_name]
-                            volumes[str(exam.Name)] = voxelize(geometry, spacing)
+                            volumes[str(exam.Name)] = read_surface(geometry, spacing, self.pulse)
                         def progress(i, n):
-                            self.status.set("Beam {} | CP {}/{} | {} mm grid".format(name, i, n, self.resolution.get()))
+                            self.status.set("Beam {} | CP {}/{} | {} mm grid | {}".format(
+                                name, i, n, self.resolution.get(), volumes[str(exam.Name)].method))
                         bam, ncp = calculate_beam(beam, self.machine_db, volumes[str(exam.Name)], self.pulse, progress)
                         results.append(bam)
                         mus.append(mu)
                         self.table.item(row, values=(label, name, "{:.2f}".format(mu), ncp,
-                                                    "{:.4f}".format(bam), "OK (sampled geometry)"))
+                                                    "{:.4f}".format(bam), "—", "OK ({})".format(volumes[str(exam.Name)].method)))
                     except Cancelled:
-                        self.table.item(row, values=(label, name, "—", "—", "—", "Cancelled"))
+                        self.table.item(row, values=(label, name, "—", "—", "—", "—", "Cancelled"))
                         raise
                     except Exception as exc:
                         failed += 1
                         # Native exceptions can contain patient identifiers; never echo them.
                         message = str(exc) if isinstance(exc, CalculationError) else "RayStation API read failed ({})".format(type(exc).__name__)
-                        self.table.item(row, values=(label, name, "—" if mu is None else "{:.2f}".format(mu), "—", "—", message))
+                        self.table.item(row, values=(label, name, "—" if mu is None else "{:.2f}".format(mu), "—", "—", "—", message))
+                    finally:
+                        self.table.set(row, "seconds", "{:.1f}".format(time.perf_counter()-self.beam_started))
+                        self.active_row = self.beam_started = None
                     self.table.see(row)
             require(failed == 0 and total > 0 and len(results) == total,
                     "Plan PAM unavailable: {} failed beam(s); {} complete beam(s).".format(failed, len(results)))
             require(len(exams) == 1, "Plan PAM unavailable: beam sets use different planning examinations.")
             pam = weighted_mean(results, mus)
             self.pam.set("Plan PAM: {:.4f}  ({:.2f}%)".format(pam, 100*pam))
-            self.status.set("{} | {} treatment beams | {:.2f} MU | {} mm grid | {} excluded beam(s).".format(
-                roi_name, total, sum(mus), self.resolution.get(), excluded))
+            self.status.set("{} | {} treatment beams | {:.2f} MU | {} mm grid | {} | {} excluded beam(s).".format(
+                roi_name, total, sum(mus), self.resolution.get(), ", ".join(sorted({v.method for v in volumes.values()})), excluded))
         except Cancelled:
             self.pam.set("Plan PAM: unavailable")
             self.status.set("Cancelled. Completed beam rows remain visible; no partial plan PAM is shown.")
@@ -505,6 +678,11 @@ class Viewer:
         finally:
             volumes.clear()
             self.running = False
+            self.stopped = time.perf_counter()
+            if self.timer_job is not None:
+                self.root.after_cancel(self.timer_job)
+                self.timer_job = None
+            self.tick()
             self.calculate_button.configure(state="normal")
             self.cancel_button.configure(state="disabled")
             self.roi_box.configure(state="readonly")

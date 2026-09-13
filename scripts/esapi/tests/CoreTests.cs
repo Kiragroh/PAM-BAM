@@ -96,18 +96,18 @@ class CoreTests
     }
     static void TestSelectableProfiles()
     {
-        var sd=Calculation.ResolveProfile("Varian Millennium 120",0,0);
-        var hd=Calculation.ResolveProfile("Varian High Definition 120",0,0);
+        var sd=Calculation.ResolveProfile("Varian Millennium 120",0);
+        var hd=Calculation.ResolveProfile("Varian High Definition 120",0);
         Assert(sd.Kind==1 && hd.Kind==2,"Auto distinguishes SD and HD despite identical leaf counts");
         Near(sd.Layers[0].Edges[0],-200,"SD lower extent");
         Near(sd.Layers[0].Edges[10],-100,"SD inner transition");
         Near(sd.Layers[0].Edges[50],100,"SD outer transition");
         Near(sd.Layers[0].Edges[60],200,"SD upper extent");
-        Reject(()=>Calculation.ResolveProfile("HD120",1,0),"Known HD cannot silently use SD widths");
-        Reject(()=>Calculation.ResolveProfile("Millennium120",2,0),"Known SD cannot silently use HD widths");
-        Reject(()=>Calculation.ResolveProfile("SX2",0,0),"Auto dual never guesses native order");
-        Reject(()=>Calculation.ResolveProfile("UnknownModel",0,0),"Unknown model requires explicit profile");
-        Assert(Calculation.ResolveProfile("LocalMlcAlias",1,0).Kind==1,"Explicit local SD profile accepted");
+        Reject(()=>Calculation.ResolveProfile("HD120",1),"Known HD cannot silently use SD widths");
+        Reject(()=>Calculation.ResolveProfile("Millennium120",2),"Known SD cannot silently use HD widths");
+        Assert(Calculation.ResolveProfile("SX2",0).Kind==3,"Auto SX2 selects the fixed Halcyon profile");
+        Reject(()=>Calculation.ResolveProfile("UnknownModel",0),"Unknown model requires explicit profile");
+        Assert(Calculation.ResolveProfile("LocalMlcAlias",1).Kind==1,"Explicit local SD profile accepted");
         Reject(()=>sd.Validate(57),"SD profile rejects dual leaf count");
         var line=new Sample { X0=.1,Y0=-199.75,Step=.5,Width=1,Height=800,Target=Enumerable.Repeat(true,800).ToArray() };
         var leaves=Leaves(0,0);leaves[0,0]=-1;leaves[1,0]=1;
@@ -115,27 +115,37 @@ class CoreTests
         leaves=Leaves(0,0);leaves[0,10]=-1;leaves[1,10]=1;
         Near(1-Calculation.BlockedFraction(line,leaves,new[]{-2.0,-220,2,220},sd),10.0/800,"SD central leaf 5 mm");
         var square=new Sample { X0=-9.5,Y0=-9.5,Step=1,Width=20,Height=20,Target=Enumerable.Repeat(true,400).ToArray() };
-        for(int order=1;order<=3;order++)
-        {
-            var dual=Calculation.ResolveProfile("SX2",3,order);dual.Validate(57);
-            var banks=new float[2,57];
-            foreach(int i in dual.Layers[0].Indices) { banks[0,i]=-8;banks[1,i]=6; }
-            foreach(int i in dual.Layers[1].Indices) { banks[0,i]=-3;banks[1,i]=9; }
-            Near(Calculation.BlockedFraction(square,banks,null,dual),.55,"Layer intersection for native order "+order);
-            // Placeholder jaws must not close a genuinely jawless Halcyon field.
-            Near(Calculation.BlockedFraction(square,banks,new double[4],dual),.55,"Fixed limits supersede nonexistent jaws "+order);
-            foreach(int i in dual.Layers[0].Indices) { banks[0,i]=-10;banks[1,i]=0; }
-            foreach(int i in dual.Layers[1].Indices) { banks[0,i]=0;banks[1,i]=10; }
-            Near(Calculation.BlockedFraction(square,banks,null,dual),1,"Disjoint layer openings transmit no target "+order);
-            for(int i=0;i<57;i++) { banks[0,i]=-20;banks[1,i]=20; }
-            int central29=dual.Layers[0].Indices[14],near28=dual.Layers[1].Indices[13];
-            banks[0,central29]=banks[1,central29]=0;
-            banks[0,near28]=banks[1,near28]=0;
-            Near(Calculation.BlockedFraction(square,banks,null,dual),.75,"Real 5 mm layer stagger "+order);
-            Reject(()=>Calculation.BlockedFraction(square,new float[2,60],null,dual),"Dual rejects 60-pair arrays "+order);
-        }
+        var dual=Calculation.ResolveProfile("SX2",3);dual.Validate(57);
+        // Input arrays use the confirmed 28+29 native blocks directly, independently
+        // of profile.Indices. The fixture must not reproduce the implementation's mapping.
+        var banks=new float[2,57];
+        for(int i=0;i<28;i++) { banks[0,i]=-3;banks[1,i]=9; }
+        for(int i=28;i<57;i++) { banks[0,i]=-8;banks[1,i]=6; }
+        Near(Calculation.BlockedFraction(square,banks,null,dual),.55,"28+29 layer intersection");
+        Near(Calculation.BlockedFraction(square,banks,new double[4],dual),.55,"Fixed limits supersede nonexistent jaws");
+        for(int i=0;i<28;i++) { banks[0,i]=0;banks[1,i]=10; }
+        for(int i=28;i<57;i++) { banks[0,i]=-10;banks[1,i]=0; }
+        Near(Calculation.BlockedFraction(square,banks,null,dual),1,"Disjoint layer openings transmit no target");
+        for(int i=0;i<57;i++) { banks[0,i]=-20;banks[1,i]=20; }
+        banks[0,42]=banks[1,42]=0; // 29-pair layer, strip -5..5 mm.
+        banks[0,13]=banks[1,13]=0; // 28-pair layer, strip -10..0 mm.
+        Near(Calculation.BlockedFraction(square,banks,null,dual),.75,"Real 5 mm layer stagger");
+        Reject(()=>Calculation.BlockedFraction(square,new float[2,60],null,dual),"Dual rejects 60-pair arrays");
+        // Asymmetric native-index regression: reversed blocks or interleaving must fail.
+        banks=new float[2,57];
+        banks[0,13]=banks[0,42]=-1;banks[1,13]=banks[1,42]=1;
+        var point=new Sample { X0=.5,Y0=-2.5,Step=1,Width=1,Height=1,Target=new[]{true} };
+        Near(Calculation.BlockedFraction(point,banks,null,dual),0,"Native pairs 13/42 share -5..0 mm");
+        point.Y0=-7.5;
+        Near(Calculation.BlockedFraction(point,banks,null,dual),1,"Native pair 42 blocks below -5 mm");
+        banks=new float[2,57];banks[0,0]=banks[0,28]=-1;banks[1,0]=banks[1,28]=1;
+        point.Y0=-137.5;
+        Near(Calculation.BlockedFraction(point,banks,null,dual),0,"First pair of each native block shares lower edge");
+        banks=new float[2,57];banks[0,27]=banks[0,56]=-1;banks[1,27]=banks[1,56]=1;
+        point.Y0=137.5;
+        Near(Calculation.BlockedFraction(point,banks,null,dual),0,"Last pair of each native block shares upper edge");
         var limitGrid=new Sample { X0=139.5,Y0=-.5,Step=1,Width=2,Height=1,Target=new[]{true,true} };
-        var profile=Calculation.ResolveProfile("SX1",0,1);var open=new float[2,57];
+        var profile=Calculation.ResolveProfile("SX1",0);var open=new float[2,57];
         for(int i=0;i<57;i++) { open[0,i]=-200;open[1,i]=200; }
         Near(Calculation.BlockedFraction(limitGrid,open,null,profile),.5,"Halcyon fixed field clips at 140 mm");
         // A duplicate/missing mapping may not silently discard a physical leaf.

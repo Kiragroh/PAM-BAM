@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 import numpy as np
 
 spec = importlib.util.spec_from_file_location("pam_bam", Path(__file__).resolve().parents[1] / "PAM_BAM.py")
@@ -112,6 +113,71 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(mask.sum(),1)
         self.assertEqual(g.kwargs['NrVoxels'],dict(x=12,y=12,z=12))
         np.testing.assert_allclose(corner,[-.1]*3)
+
+
+class SurfaceTests(unittest.TestCase):
+    def test_block_surface_matches_reference_rays_at_oblique_views(self):
+        rng = np.random.default_rng(2928)
+        mask = rng.random((9, 10, 11)) < .35
+        v = mask, np.array([-1.1, -1., -.9]), .2
+        surface = p.voxel_surface(v)
+        for angle in (0, 13, 91, 153, 271):
+            frame = p.beam_frame(angle, 21, 17)
+            actual = p.project_surface(surface, np.array([.1, .3, -.4]), 100, frame)
+            expected = p.project_target(v, np.array([.1, .3, -.4]), 100, frame)
+            np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=0)
+
+    def test_surface_retains_hole_and_disconnected_components(self):
+        mask, corner, spacing = volume()
+        mask[:, :, 8:12] = False
+        surface = p.voxel_surface((mask, corner, spacing))
+        x, y = p.project_surface(surface, np.zeros(3), 100, p.beam_frame(0, 0, 0))
+        self.assertFalse(np.any(abs(x) < .15))
+        self.assertTrue(np.any(x < -.5) and np.any(x > .5))
+        mask[:, :, 8:12] = True
+        mask[8:12, :, 8:12] = False
+        x, y = p.project_surface(p.voxel_surface((mask, corner, spacing)), np.zeros(3), 100, p.beam_frame(0, 0, 0))
+        self.assertFalse(np.any((abs(x) < .15) & (abs(y) < .15)))
+
+    def test_native_mesh_read_is_read_only_and_matches_perspective_cube(self):
+        cube = p.voxel_surface(volume()).faces
+        self.assertEqual(len(cube), 6)
+        triangles = np.concatenate((cube[:, [0, 1, 2]], cube[:, [0, 2, 3]]))
+        vertices = [dict(zip('xyz', point)) for point in triangles.reshape(-1, 3)]
+        geometry = NS(HasContours=lambda: True, PrimaryShape=NS(
+            Vertices=vertices, Indices=np.arange(len(vertices), dtype=np.int32), IsClosed=True))
+        # No voxel conversion or mutation methods exist on this fixture.
+        native = p.read_surface(geometry, .05)
+        self.assertEqual(native.method, 'Native mesh')
+        self.assertEqual(native.spacing, .05)
+        for angles in ((0, 0, 0), (39, 18, 73), (270, 0, 0)):
+            frame = p.beam_frame(*angles)
+            reference = np.ones((40, 40, 40), dtype=bool), np.full(3, -1.), .05
+            np.testing.assert_allclose(p.project_surface(native, np.zeros(3), 10, frame),
+                                       p.project_target(reference, np.zeros(3), 10, frame), atol=1e-12, rtol=0)
+        geometry.PrimaryShape.IsClosed = False
+        with self.assertRaises(p.CalculationError):
+            p.read_surface(geometry, .05)
+
+    def test_surface_cancellation_and_invalid_geometry(self):
+        def cancel(): raise p.Cancelled()
+        with self.assertRaises(p.Cancelled): p.voxel_surface(volume(), cancel)
+        surface = p.voxel_surface(volume())
+        with self.assertRaises(p.Cancelled): p.project_surface(surface, np.zeros(3), 100, p.beam_frame(0, 0, 0), cancel)
+        with self.assertRaises(p.CalculationError): p.Surface([], .1, 'invalid')
+        with self.assertRaises(p.CalculationError): p.project_surface(surface, np.zeros(3), 1, p.beam_frame(0, 0, 0))
+
+    def test_surface_arc_uses_new_projection_at_each_angle(self):
+        b = beam(); b.DeliveryTechnique = 'DynamicArc'
+        b.ArcRotationDirection = 'Clockwise'; b.ArcStopGantryAngle = 90
+        b.Segments = [NS(RelativeWeight=w, CollimatorAngle=0, JawPositions=[-2, 2, -2, 2],
+                         LeafPositions=[[-2]*4, [2]*4], IsVirtual=False,
+                         DeltaGantryAngle=g, DeltaCouchAngle=0) for w, g in ((.25, 0), (.75, 90))]
+        mask, corner, spacing = volume()
+        surface = p.voxel_surface((mask, corner+np.array([4., 0., 0.]), spacing))
+        bam, n = p.calculate_beam(b, NS(GetTreatmentMachine=lambda **kw: machine()), surface)
+        self.assertAlmostEqual(bam, .25)
+        self.assertEqual(n, 2)
 
 
 class ApertureTests(unittest.TestCase):
@@ -233,6 +299,10 @@ class GuiTests(unittest.TestCase):
         self.assertIn('1 failed',self.viewer.status.get())
         self.assertFalse(self.viewer.running)
         self.assertEqual(str(self.viewer.calculate_button['state']),'normal')
+        self.assertIsNone(self.viewer.timer_job)
+        self.assertIn('Elapsed:', self.viewer.elapsed.get())
+        for row in self.viewer.table.get_children():
+            self.assertGreaterEqual(float(self.viewer.table.set(row, 'seconds')), 0)
 
     def test_no_positive_mu_beams_no_pam(self):
         self.b.BeamMU=0
@@ -244,6 +314,27 @@ class GuiTests(unittest.TestCase):
         self.viewer.calculate()
         self.assertEqual(self.viewer.pam.get(),'Plan PAM: unavailable')
         self.assertIn('Cancelled',self.viewer.status.get())
+        self.assertIsNone(self.viewer.timer_job)
+        self.assertFalse(self.viewer.running)
+
+    def test_live_timer_and_stopped_time(self):
+        self.viewer.running = True
+        self.viewer.started = 100
+        self.viewer.beam_started = 101
+        row = self.viewer.table.insert('', 'end', values=('Synthetic', 'Synthetic', 100, 1, 0, 0, 'Running'))
+        self.viewer.active_row = row
+        with patch.object(p.time, 'perf_counter', return_value=102.5):
+            self.viewer.tick()
+        self.assertIn('Elapsed: 2.5 s', self.viewer.elapsed.get())
+        self.assertIn('Current beam: 1.5 s', self.viewer.elapsed.get())
+        self.assertEqual(self.viewer.table.set(row, 'seconds'), '1.5')
+        self.root.after_cancel(self.viewer.timer_job)
+        self.viewer.timer_job = None
+        self.viewer.running = False
+        self.viewer.stopped = 103
+        with patch.object(p.time, 'perf_counter', return_value=900):
+            self.viewer.tick()
+        self.assertIn('Elapsed: 3.0 s', self.viewer.elapsed.get())
 
     def test_mixed_planning_examinations_no_plan_pam(self):
         bs2=NS(**vars(self.bs)); bs2.GetPlanningExamination=lambda:NS(Name='Synthetic_CT_2')
