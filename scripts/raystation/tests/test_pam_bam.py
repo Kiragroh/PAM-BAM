@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
+import time
 from unittest.mock import patch
 import numpy as np
 
@@ -116,6 +117,47 @@ class ProjectionTests(unittest.TestCase):
 
 
 class SurfaceTests(unittest.TestCase):
+    def test_large_fine_grid_is_read_in_bounded_blocks_without_coarsening(self):
+        class Geometry:
+            def __init__(self): self.requests = []
+            def HasContours(self): return True
+            def GetBoundingBox(self): return [dict.fromkeys('xyz', 0.), dict.fromkeys('xyz', 13.)]
+            def GetRoiGeometryAsVoxels(self, **kw):
+                self.requests.append(kw)
+                counts = [kw['NrVoxels'][k] for k in 'zyx']
+                axes = [(np.arange(kw['NrVoxels'][k])+.5)*kw['VoxelSize'][k]+kw['Corner'][k] for k in 'zyx']
+                z, y, x = [(a >= 0) & (a < 13.) for a in axes]
+                return (255*(z[:, None, None] & y[None, :, None] & x[None, None, :])).astype(np.uint8).ravel()
+        g = Geometry()
+        surface = p.read_surface(g, .05)
+        self.assertGreater(len(g.requests), 1)
+        self.assertTrue(all(np.prod(list(r['NrVoxels'].values())) <= p.MAX_VOXELS for r in g.requests))
+        self.assertTrue(all(r['VoxelSize'] == dict.fromkeys('xyz', .05) for r in g.requests))
+        np.testing.assert_allclose(surface.faces.min(axis=(0, 1)), [0]*3, atol=1e-10)
+        np.testing.assert_allclose(surface.faces.max(axis=(0, 1)), [13]*3, atol=1e-10)
+
+    def test_slab_interfaces_do_not_create_caps_or_fill_holes(self):
+        mask = np.zeros((18, 18, 18), dtype=np.uint8)
+        mask[1:-1, 1:-1, 1:-1] = 255
+        mask[:, 7:11, 7:11] = 0
+        class Geometry:
+            def HasContours(self): return True
+            def GetBoundingBox(self): return [dict.fromkeys('xyz', -2.), dict.fromkeys('xyz', 2.)]
+            def GetRoiGeometryAsVoxels(self, **kw):
+                start = np.rint((np.array([kw['Corner'][k] for k in 'zyx'])+2.25)/.25).astype(int)
+                count = [kw['NrVoxels'][k] for k in 'zyx']
+                self.requests.append(kw)
+                return mask[tuple(slice(a, a+b) for a, b in zip(start, count))].ravel()
+        g = Geometry(); g.requests = []
+        with patch.object(p, 'MAX_VOXELS', 1000):
+            actual = p.read_surface(g, .25)
+        reference = mask >= 128, np.full(3, -2.25), .25
+        for angles in ((0, 0, 0), (90, 90, 0), (33, 28, 17)):
+            frame = p.beam_frame(*angles)
+            np.testing.assert_allclose(p.project_surface(actual, np.zeros(3), 100, frame),
+                                       p.project_target(reference, np.zeros(3), 100, frame), atol=1e-10, rtol=0)
+        self.assertTrue(all(np.prod(list(r['NrVoxels'].values())) <= 1000 for r in g.requests))
+
     def test_block_surface_matches_reference_rays_at_oblique_views(self):
         rng = np.random.default_rng(2928)
         mask = rng.random((9, 10, 11)) < .35
@@ -181,6 +223,28 @@ class SurfaceTests(unittest.TestCase):
 
 
 class ApertureTests(unittest.TestCase):
+    def test_cached_leaf_lookup_matches_strip_union_including_gaps_and_overlap(self):
+        rng = np.random.default_rng(28129)
+        x = np.r_[rng.uniform(-5, 5, 4000), [0, 0, 0, 0]]
+        y = np.r_[rng.uniform(-3, 3, 4000), [-2, -.5, .5, 2]]
+        layers = [(np.array([1.5, -1.5, 0.]), np.array([1., 1., 1.])),
+                  (np.array([-.4, .4]), np.array([1., 1.]))]
+        for axis in ('X', 'Y'):
+            moving, across = (x, y) if axis == 'X' else (y, x)
+            lookup = p.prepare_aperture(x, y, layers, axis)
+            for _ in range(6):
+                banks = []
+                expected = np.ones(len(x), dtype=bool)
+                for centres, widths in layers:
+                    pair = np.sort(rng.uniform(-4, 4, (2, len(centres))), axis=0)
+                    banks.extend(pair)
+                    opened = np.zeros(len(x), dtype=bool)
+                    for centre, width, left, right in zip(centres, widths, *pair):
+                        opened |= ((across >= centre-width/2) & (across < centre+width/2)
+                                   & (moving >= left) & (moving < right))
+                    expected &= opened
+                np.testing.assert_array_equal(p.aperture_open(x, y, layers, banks, axis, None, lookup), expected)
+
     def test_open_closed_half_and_jaws(self):
         x,y=p.project_target(volume(),np.zeros(3),100,p.beam_frame(0,0,0))
         layers=[(np.array([0.]),np.array([4.]))]
@@ -210,6 +274,26 @@ class ApertureTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_phase_timings_include_api_delay_and_reuse_static_leaf_lookup(self):
+        class SlowSegment(NS):
+            def __getattribute__(self, name):
+                if name == 'LeafPositions':
+                    time.sleep(.005)
+                return super().__getattribute__(name)
+        b = beam()
+        values = vars(b.Segments[0]).copy()
+        values['RelativeWeight'] = .5
+        b.Segments = [SlowSegment(**values), SlowSegment(**values)]
+        timings = p.Timings()
+        with patch.object(p, 'prepare_aperture', wraps=p.prepare_aperture) as lookup:
+            result, _ = p.calculate_beam(b, NS(GetTreatmentMachine=lambda **kw: machine()),
+                                         p.voxel_surface(volume()), timings=timings)
+        self.assertEqual(result, 0)
+        self.assertEqual(lookup.call_count, 1)
+        self.assertEqual(timings.calls['Projection'], 1)
+        self.assertGreaterEqual(timings.seconds['API'], .01)
+        self.assertIn('MLC', timings.summary())
+
     def test_weighted_reference_example(self):
         self.assertAlmostEqual(p.weighted_mean([.10,.55,.30,.15],[10,30,40,20]),.325)
         self.assertAlmostEqual(p.weighted_mean([.1,.5],[100,300]),.4)
@@ -299,6 +383,8 @@ class GuiTests(unittest.TestCase):
         self.assertIn('1 failed',self.viewer.status.get())
         self.assertFalse(self.viewer.running)
         self.assertEqual(str(self.viewer.calculate_button['state']),'normal')
+        for phase in ('API', 'Surface', 'Projection', 'MLC'):
+            self.assertIn(phase, self.viewer.detail.get())
         self.assertIsNone(self.viewer.timer_job)
         self.assertIn('Elapsed:', self.viewer.elapsed.get())
         for row in self.viewer.table.get_children():

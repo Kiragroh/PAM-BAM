@@ -9,7 +9,13 @@
   **28 synthetic tests passed**, including oblique comparisons against the old
   ray traversal and native mesh reading. A five-view 0.5 mm synthetic benchmark
   gave 9.9x faster projection (3.1x including surface setup), with identical BEV
-  samples. New execution inside RayStation is pending.
+  samples. The subsequent user run confirmed the voxel-surface path but found
+  a remaining speed gap versus Eclipse and `ROI grid too large` at 0.5 mm.
+  GUI 1.2 changes the 16M guard to a per-read bound with halo slabs, caches MLC
+  sample-to-strip lookup, and displays per-beam API/surface/projection/MLC times.
+  **32 synthetic tests passed**, including an above-16M 0.5 mm ROI, unchanged
+  sampling, holes at slab interfaces and phase timing with simulated API delay.
+  New execution of 1.2 inside RayStation is pending; no speed parity is claimed.
   See [RayStation details](../scripts/raystation/README.md) for its source hash
   and the distinction between user runtime feedback and commissioning.
 - ESAPI GUI 1.2 (Auto / TrueBeam SD / HD / Halcyon SX): native x64/.NET Framework

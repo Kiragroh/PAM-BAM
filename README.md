@@ -12,7 +12,7 @@ clinically commissioned software.
 
 | TPS | Standalone script | Current test status |
 |---|---|---|
-| RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | GUI 1.1: surface projection + live timer; 28 synthetic tests; new native test pending |
+| RayStation | [PAM_BAM.py](scripts/raystation/PAM_BAM.py) | GUI 1.2: bounded voxel reads, cached MLC lookup and phase timings; 32 synthetic tests; new native test pending |
 | Eclipse / ESAPI, SD / HD / Halcyon SX | [PAM_BAM.cs](scripts/esapi/PAM_BAM.cs) | GUI 1.2: ESAPI 18 compile; 65 synthetic assertions; fixed user-confirmed 28+29 Halcyon order |
 
 The ESAPI GUI offers Auto, TrueBeam SD (Millennium 120), TrueBeam HD (HD120) and
@@ -30,8 +30,10 @@ package does not have to be installed.
 **Runtime feedback:** the user successfully ran GUI version 1.0 in RayStation
 and reported approximately **4 seconds per field at a 2 mm grid**. This is one
 reported application run, not a universal benchmark or commissioning result.
-The tested 1.0 script is preserved in Git history; the current 1.1 adds surface
-projection and a live timer. No clinical screenshot, plan
+The tested 1.0 script is preserved in Git history. Version 1.1 added surface
+projection and a live timer, but user feedback identified a 0.5 mm grid-size
+failure and a remaining speed gap versus Eclipse. Version 1.2 fixes the total
+voxel limit using bounded reads and adds phase timings. No clinical screenshot, plan
 identifiers or target names are published. See [usage and validation](scripts/raystation/README.md).
 
 ## Definitions

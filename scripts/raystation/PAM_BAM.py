@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""PAM / BAM viewer 1.1 -- standalone, read-only RayStation file script.
+"""PAM / BAM viewer 1.2 -- standalone, read-only RayStation file script.
 
 Run in RayStation CPython with an open plan; select a target ROI and Calculate.
 Dependencies: numpy, tkinter (no installation or repository import at runtime).
@@ -16,6 +16,8 @@ ROI is voxelized (>=128/255 occupancy) and its exact block surface is extracted
 in memory. Both paths project surface polygons onto the isocenter BEV plane;
 no per-ray 3D traversal and no TPS representation change. In the voxel fallback,
 both voxels and BEV use the selected spacing; for native meshes only BEV changes.
+Voxel reads use bounded slabs with neighbour halos; the requested grid is never
+silently coarsened. Per-beam detail reports API/surface/projection/MLC timings.
 Compare resolutions and the displayed surface method when comparing results.
 Lengths from RayStation are cm throughout; only the GUI spacing is in mm.
 
@@ -58,9 +60,10 @@ SOFTWARE.
 import itertools
 import math
 import time
+from contextlib import contextmanager
 import numpy as np
 
-VERSION = "1.1"
+VERSION = "1.2"
 MAX_VOXELS = 16_000_000
 MAX_BEV_PIXELS = 600_000
 MAX_SURFACE_FACES = 1_000_000
@@ -72,6 +75,27 @@ class CalculationError(Exception):
 
 class Cancelled(Exception):
     pass
+
+
+class Timings:
+    """In-memory phase timings only; never logged or exported."""
+    def __init__(self):
+        self.seconds = dict.fromkeys(("API", "Surface", "Projection", "MLC"), 0.0)
+        self.calls = dict.fromkeys(self.seconds, 0)
+        self.notes = []
+
+    @contextmanager
+    def measure(self, phase):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.seconds[phase] += time.perf_counter()-start
+            self.calls[phase] += 1
+
+    def summary(self):
+        return " | ".join("{} {:.3f} s".format(k, v) for k, v in self.seconds.items()) + \
+            " | {} projections".format(self.calls["Projection"]) + ("\n"+"; ".join(self.notes) if self.notes else "")
 
 
 def require(condition, message):
@@ -219,7 +243,7 @@ class Surface:
         self.method = method
 
 
-def voxel_surface(volume, pulse=lambda: None):
+def voxel_faces(volume, pulse=lambda: None, core_z=None):
     """Exact exposed voxel faces, merged only within a coplanar rectangle.
 
     This preserves the thresholded volume, holes and disconnected components.
@@ -233,7 +257,16 @@ def voxel_surface(volume, pulse=lambda: None):
         other = [k for k in range(3) if k != axis]
         for plane in np.flatnonzero(np.any(changes != 0, axis=(1, 2))):
             pulse()
+            if core_z is not None and axis == 0:
+                first, last = core_z
+                if plane < first or plane > last or (plane == last and last < mask.shape[0]):
+                    continue
             boundary = changes[plane] != 0
+            if core_z is not None and axis != 0:
+                # Z is the first in-plane axis. Halo neighbours determine true
+                # boundaries, but only the core contributes side faces.
+                boundary[:core_z[0]] = False
+                boundary[core_z[1]:] = False
             runs = np.diff(np.pad(boundary.astype(np.int8), ((0, 0), (1, 1))), axis=1)
             active = {}
             rectangles = []
@@ -252,26 +285,76 @@ def voxel_surface(volume, pulse=lambda: None):
                 face[:, other[0]] = [r0, r0, r1, r1]
                 face[:, other[1]] = [c0, c1, c1, c0]
                 faces.append(corner + spacing * face[:, ::-1])
-    return Surface(faces, spacing, "Voxel surface")
+    return faces
 
 
-def read_surface(geometry, spacing, pulse=lambda: None):
-    require(geometry.HasContours(), "Selected target has no geometry.")
+def voxel_surface(volume, pulse=lambda: None):
+    return Surface(voxel_faces(volume, pulse), volume[2], "Voxel surface")
+
+
+def read_voxel_surface(geometry, spacing, pulse=lambda: None, timings=None):
+    """Read bounded Z slabs at the requested resolution, with one-voxel halos.
+
+    The former 16M limit now bounds each native read, not the whole ROI.
+    Halo faces are excluded, so slab interfaces introduce no artificial caps.
+    """
+    timings = timings if timings is not None else Timings()
+    with timings.measure("API"):
+        lower, upper = [xyz(p) for p in geometry.GetBoundingBox()]
+    require(np.all(upper > lower) and finite(spacing) > 0, "Invalid ROI bounds or spacing.")
+    corner = lower-spacing
+    counts = np.ceil((upper-lower)/spacing).astype(int)+2
+    xy = int(counts[0])*int(counts[1])
+    max_depth = MAX_VOXELS//xy
+    require(max_depth >= 3, "ROI cross-section exceeds the voxel block limit at this resolution.")
+    depth = int(counts[2]) if int(np.prod(counts)) <= MAX_VOXELS else max_depth-2
+    timings.notes.append("ROI {}x{}x{} ({:.1f} M voxels), {:.1f} mm, {} block(s)".format(
+        *counts, int(np.prod(counts))/1e6, spacing*10, math.ceil(int(counts[2])/depth)))
+    faces = []
+    for start in range(0, int(counts[2]), depth):
+        pulse()
+        stop = min(int(counts[2]), start+depth)
+        read_start, read_stop = max(0, start-1), min(int(counts[2]), stop+1)
+        block_corner = corner+np.array([0., 0., read_start*spacing])
+        block_counts = np.array([counts[0], counts[1], read_stop-read_start])
+        with timings.measure("API"):
+            values = np.asarray(geometry.GetRoiGeometryAsVoxels(
+                Corner=point_dict(block_corner), VoxelSize=point_dict([spacing]*3),
+                NrVoxels=point_dict(block_counts, int)), dtype=np.uint8)
+        require(values.size == int(np.prod(block_counts)), "RayStation returned an incomplete ROI block.")
+        with timings.measure("Surface"):
+            mask = values.reshape(tuple(block_counts[::-1])) >= 128
+            del values
+            faces.extend(voxel_faces((mask, block_corner, spacing), pulse, (start-read_start, stop-read_start)))
+        require(len(faces) <= MAX_SURFACE_FACES, "Target surface exceeds the surface size limit.")
+    require(bool(faces), "ROI is empty at this resolution: choose a finer grid.")
+    with timings.measure("Surface"):
+        surface = Surface(faces, spacing, "Voxel surface")
+    timings.notes.append("{} surface faces".format(len(surface.faces)))
+    return surface
+
+
+def read_surface(geometry, spacing, pulse=lambda: None, timings=None):
+    timings = timings if timings is not None else Timings()
+    with timings.measure("API"):
+        require(geometry.HasContours(), "Selected target has no geometry.")
     pulse()
     # PrimaryShape may be Contours/BinaryRoi instead. Probe only documented
     # read properties; never call SetRepresentation or create a temporary ROI.
     try:
-        shape = geometry.PrimaryShape
-        native_vertices, native_indices, closed = shape.Vertices, shape.Indices, shape.IsClosed
+        with timings.measure("API"):
+            shape = geometry.PrimaryShape
+            native_vertices, native_indices, closed = shape.Vertices, shape.Indices, shape.IsClosed
     except Exception:
-        return voxel_surface(voxelize(geometry, spacing), pulse)
+        return read_voxel_surface(geometry, spacing, pulse, timings)
     require(bool(closed), "Native target mesh is not closed.")
     require(len(native_indices) <= 3*MAX_SURFACE_FACES, "Native target mesh exceeds the surface size limit.")
     vertices = []
-    for i, vertex in enumerate(native_vertices):
-        if i % 2048 == 0:
-            pulse()
-        vertices.append(xyz(vertex))
+    with timings.measure("API"):
+        for i, vertex in enumerate(native_vertices):
+            if i % 2048 == 0:
+                pulse()
+            vertices.append(xyz(vertex))
     vertices = np.array(vertices)
     indices = np.asarray(native_indices)
     require(vertices.ndim == 2 and vertices.shape[1] == 3
@@ -279,7 +362,10 @@ def read_surface(geometry, spacing, pulse=lambda: None):
             and np.issubdtype(indices.dtype, np.integer)
             and np.all((indices >= 0) & (indices < len(vertices))), "Invalid native mesh indices.")
     pulse()
-    return Surface(vertices[indices.reshape(-1, 3)], spacing, "Native mesh")
+    with timings.measure("Surface"):
+        surface = Surface(vertices[indices.reshape(-1, 3)], spacing, "Native mesh")
+    timings.notes.append("{} native triangles".format(len(surface.faces)))
+    return surface
 
 
 def project_surface(surface, iso, sad, frame, pulse=lambda: None):
@@ -342,10 +428,36 @@ def project_surface(surface, iso, sad, frame, pulse=lambda: None):
     return (i+lo[0]+.5)*step, (j+lo[1]+.5)*step
 
 
-def aperture_open(x, y, layers, banks, axis, jaws):
+def prepare_aperture(x, y, layers, axis):
+    """Map target samples to native leaf strips once per target projection."""
+    require(axis in ("X", "Y"), "Unsupported MLC movement direction.")
+    across = y if axis == "X" else x
+    result = []
+    for centres, widths in layers:
+        low, high = centres-widths/2, centres+widths/2
+        order = np.argsort(low)
+        if np.all(high[order][:-1] <= low[order][1:]):
+            strip = np.searchsorted(low[order], across, side="right")-1
+            index = order[np.clip(strip, 0, len(order)-1)]
+            valid = (strip >= 0) & (across < high[index])
+            extras = (np.array([], dtype=int), np.array([], dtype=int))
+        else:
+            # Preserve exact union semantics even for numerical overlaps.
+            membership = (across[None, :] >= low[:, None]) & (across[None, :] < high[:, None])
+            index = membership.argmax(axis=0)
+            valid = membership.any(axis=0)
+            membership[index, np.arange(len(across))] = False
+            extras = np.nonzero(membership)
+        result.append((index, valid, extras))
+    return result
+
+
+def aperture_open(x, y, layers, banks, axis, jaws, lookup=None):
     require(axis in ("X", "Y"), "Unsupported MLC movement direction.")
     require(len(banks) == 2 * len(layers), "MLC layer/bank count mismatch.")
-    moving, across = (x, y) if axis == "X" else (y, x)
+    moving = x if axis == "X" else y
+    if lookup is None:
+        lookup = prepare_aperture(x, y, layers, axis)
     opened = np.ones(len(x), dtype=bool)
     for i, (centres, widths) in enumerate(layers):
         left, right = [np.asarray(b, dtype=float) for b in banks[2*i:2*i+2]]
@@ -353,10 +465,11 @@ def aperture_open(x, y, layers, banks, axis, jaws):
                 "MLC leaf count does not match the machine geometry.")
         require(np.isfinite(left).all() and np.isfinite(right).all(), "Invalid MLC positions.")
         require(np.all(left <= right + 1e-8), "Crossed opposing MLC tips are unsupported.")
-        layer_open = np.zeros(len(x), dtype=bool)
-        for c, width, l, r in zip(centres, widths, left, right):
-            layer_open |= ((across >= c-width/2) & (across < c+width/2)
-                           & (moving >= l) & (moving < r))
+        index, valid, (extra_leaf, extra_point) = lookup[i]
+        layer_open = valid & (moving >= left[index]) & (moving < right[index])
+        if len(extra_point):
+            np.logical_or.at(layer_open, extra_point,
+                (moving[extra_point] >= left[extra_leaf]) & (moving[extra_point] < right[extra_leaf]))
         opened &= layer_open
     if jaws is not None:
         jaws = np.asarray(jaws, dtype=float)
@@ -465,26 +578,34 @@ def beam_samples(beam):
     return segments, weights, angles, couch
 
 
-def calculate_beam(beam, machine_db, volume, pulse=lambda: None, progress=lambda i, n: None):
-    segments, weights, angles, couch = beam_samples(beam)
-    sad, layers, axis, has_jaws = model_for_beam(beam, machine_db)
-    iso = xyz(beam.Isocenter.Position)
+def calculate_beam(beam, machine_db, volume, pulse=lambda: None, progress=lambda i, n: None, timings=None):
+    timings = timings if timings is not None else Timings()
+    with timings.measure("API"):
+        segments, weights, angles, couch = beam_samples(beam)
+        sad, layers, axis, has_jaws = model_for_beam(beam, machine_db)
+        iso = xyz(beam.Isocenter.Position)
     modulation = []
-    previous_frame, target = None, None
+    previous_frame, target, lookup = None, None, None
     for i, (segment, weight, gantry) in enumerate(zip(segments, weights, angles)):
         progress(i+1, len(segments))
         pulse()
         if weight == 0:
             modulation.append(0.0)
             continue
-        frame = beam_frame(gantry, couch, finite(segment.CollimatorAngle))
+        with timings.measure("API"):
+            collimator = finite(segment.CollimatorAngle)
+            banks = [np.array(b, dtype=float) for b in segment.LeafPositions]
+            jaws = segment.JawPositions if has_jaws else None
+        frame = beam_frame(gantry, couch, collimator)
         if previous_frame is None or not np.allclose(frame, previous_frame, rtol=0, atol=1e-12):
-            target = project_target(volume, iso, sad, frame, pulse)
+            with timings.measure("Projection"):
+                target = project_target(volume, iso, sad, frame, pulse)
+            with timings.measure("MLC"):
+                lookup = prepare_aperture(*target, layers, axis)
             previous_frame = frame
-        banks = [np.array(b, dtype=float) for b in segment.LeafPositions]
-        opened = aperture_open(*target, layers, banks, axis,
-                               segment.JawPositions if has_jaws else None)
-        modulation.append(1.0 - float(np.count_nonzero(opened)) / len(opened))
+        with timings.measure("MLC"):
+            opened = aperture_open(*target, layers, banks, axis, jaws, lookup)
+            modulation.append(1.0 - float(np.count_nonzero(opened)) / len(opened))
     return weighted_mean(modulation, weights), len(segments)
 
 
@@ -494,9 +615,10 @@ class Viewer:
         self.running = self.cancelled = False
         self.started = self.beam_started = self.stopped = None
         self.active_row = self.timer_job = None
+        self.row_timings = {}
         self.last_pulse = 0.0
         root.title("PAM / BAM  " + VERSION)
-        root.geometry("1000x560")
+        root.geometry("1000x640")
         root.minsize(800, 450)
         root.protocol("WM_DELETE_WINDOW", self.close)
         panel = ttk.Frame(root, padding=16)
@@ -539,7 +661,7 @@ class Viewer:
         ttk.Label(panel, textvariable=self.elapsed).pack(anchor="w")
         self.status = tk.StringVar(value="Select the same target ROI for all treatment beams in the open plan.")
         ttk.Label(panel, textvariable=self.status, wraplength=940).pack(anchor="w", pady=4)
-        self.detail = tk.StringVar(value="Select a beam row to read its full status.")
+        self.detail = tk.StringVar(value="Select a beam row for API / surface / projection / MLC timings.")
         ttk.Label(panel, textvariable=self.detail, wraplength=940).pack(anchor="w", pady=2)
         self.table.bind("<<TreeviewSelect>>", self.show_detail)
         self.roi_box.bind("<<ComboboxSelected>>", self.invalidate)
@@ -550,16 +672,19 @@ class Viewer:
 
     def invalidate(self, event=None):
         self.table.delete(*self.table.get_children())
+        self.row_timings.clear()
         self.pam.set("Plan PAM: —")
         self.status.set("Selection changed. Press Calculate to update the results.")
         self.detail.set("")
         self.elapsed.set("Elapsed: 0.0 s")
 
-    def show_detail(self, event=None):
-        rows = self.table.selection()
+    def show_detail(self, event=None, row=None):
+        rows = (row,) if row is not None else self.table.selection()
         if rows:
             values = self.table.item(rows[0], "values")
-            self.detail.set("{} / {}: {}".format(values[0], values[1], values[-1]))
+            timing = self.row_timings.get(rows[0])
+            self.detail.set("{} / {}: {}{}".format(values[0], values[1], values[-1],
+                "\n"+timing.summary() if timing is not None else ""))
 
     def cancel(self):
         self.cancelled = True
@@ -605,6 +730,7 @@ class Viewer:
         self.roi_box.configure(state="disabled")
         self.res_box.configure(state="disabled")
         self.table.delete(*self.table.get_children())
+        self.row_timings.clear()
         self.detail.set("")
         self.pam.set("Plan PAM: calculating…")
         results, mus, exams = [], [], set()
@@ -620,6 +746,8 @@ class Viewer:
                     label, name = str(beamset.DicomPlanLabel), str(beam.Name)
                     row = self.table.insert("", "end", values=(label, name, "—", "—", "—", "0.0", "Reading…"))
                     self.active_row, self.beam_started = row, time.perf_counter()
+                    timings = Timings()
+                    self.row_timings[row] = timings
                     mu = None
                     try:
                         if str(beam.DeliveryTechnique) == "Setup":
@@ -641,11 +769,13 @@ class Viewer:
                             self.status.set("Reading the target and preparing its surface…")
                             self.pulse()
                             geometry = self.case.PatientModel.StructureSets[exam.Name].RoiGeometries[roi_name]
-                            volumes[str(exam.Name)] = read_surface(geometry, spacing, self.pulse)
+                            volumes[str(exam.Name)] = read_surface(geometry, spacing, self.pulse, timings)
+                        else:
+                            timings.notes.append("Target surface reused from this calculation")
                         def progress(i, n):
                             self.status.set("Beam {} | CP {}/{} | {} mm grid | {}".format(
                                 name, i, n, self.resolution.get(), volumes[str(exam.Name)].method))
-                        bam, ncp = calculate_beam(beam, self.machine_db, volumes[str(exam.Name)], self.pulse, progress)
+                        bam, ncp = calculate_beam(beam, self.machine_db, volumes[str(exam.Name)], self.pulse, progress, timings)
                         results.append(bam)
                         mus.append(mu)
                         self.table.item(row, values=(label, name, "{:.2f}".format(mu), ncp,
@@ -661,6 +791,7 @@ class Viewer:
                     finally:
                         self.table.set(row, "seconds", "{:.1f}".format(time.perf_counter()-self.beam_started))
                         self.active_row = self.beam_started = None
+                        self.show_detail(row=row)
                     self.table.see(row)
             require(failed == 0 and total > 0 and len(results) == total,
                     "Plan PAM unavailable: {} failed beam(s); {} complete beam(s).".format(failed, len(results)))
