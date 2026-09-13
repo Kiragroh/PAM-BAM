@@ -11,6 +11,6 @@ Decisions: BAM is the MU-weighted blocked target fraction of one beam. PAM is th
 - [x] Add the C# source counterpart and a dependency-free console test harness, then compare deterministic cross-language vectors with Python.
 - [x] Provide read-only ESAPI and RayStation adapter examples with an explicit target-projection boundary; validate with synthetic objects and compile the ESAPI adapter against locally installed assemblies, if available.
 - [x] Document units, interval semantics, installation, limitations, original paper, related RTplan Complexity Lens link, and license. No vendor DLLs or clinical data enter Git.
-- [ ] Inspect the exact Git index, create `Kiragroh/PAM-BAM`, push only this new repository and verify remote HEAD.
+- [x] Inspect the exact Git index, create `Kiragroh/PAM-BAM`, push only this new repository and verify remote HEAD.
 
 Separate file organization: retain active code paths; move historical root folders into a dated archive, list every move, check relative file names/sizes/hashes before and after. Keep references distinct. Clinical Downloads require confirmation before entering the synchronized Seafile project; do not infer de-identification from name masking.
