@@ -6,3 +6,5 @@
 *.yml text eol=lf
 *.toml text eol=lf
 *.cff text eol=lf
+# Preserve the original generated vector artwork and keep code reviews readable.
+docs/images/pam-explained.svg -text -diff linguist-generated=true
